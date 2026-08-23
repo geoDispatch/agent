@@ -27,10 +27,11 @@ logger = logging.getLogger("geodispatch.decide")
 router = APIRouter()
 
 
-# Sync def on purpose: call_agent makes blocking Ollama calls, so FastAPI runs
-# this in its threadpool instead of blocking the event loop.
+# Async def on purpose: call_agent is a coroutine that fans out one Ollama call
+# per device concurrently (asyncio.gather), so we await it directly on the event
+# loop rather than running a blocking call in the threadpool.
 @router.post("/decide", response_model=AgentResponse)
-def decide(request: AgentRequest) -> AgentResponse:
+async def decide(request: AgentRequest) -> AgentResponse:
     started = time.perf_counter()
     # Per-request context for the logs — no phone numbers / PII.
     ctx = (
@@ -39,7 +40,7 @@ def decide(request: AgentRequest) -> AgentResponse:
     )
 
     try:
-        response = call_agent(request)
+        response = await call_agent(request)
     except Exception:
         elapsed_ms = (time.perf_counter() - started) * 1000
         # logger.exception records the full traceback in the SERVER log only.

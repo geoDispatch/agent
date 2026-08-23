@@ -11,15 +11,20 @@ Two deliberate design choices baked in here:
   DeviceDecision schema, and the triage rules). Sending our own system message
   would fight the baked-in one — same reasoning as the test_quality.py fix — so
   we send ONLY the user turn produced by the prompt builder.
-* **One chat call per device.** The Modelfiles say "You receive one
-  TriagedDevice per decision", and the earlier manual tests confirmed the models
-  behave best one device at a time. The prompt builders serialize a whole
-  ``AgentRequest``, so for each device we build a single-device sub-request and
-  run the builder on that — the model then sees exactly one device block.
+* **One chat call per device, dispatched concurrently.** The Modelfiles say
+  "You receive one TriagedDevice per decision", and the earlier manual tests
+  confirmed the models behave best one device at a time. The prompt builders
+  serialize a whole ``AgentRequest``, so for each device we build a single-device
+  sub-request and run the builder on that — the model then sees exactly one
+  device block. All of a batch's per-device calls are fired at once via
+  ``asyncio.gather`` over ``ollama.AsyncClient`` instead of a serial loop, so
+  wall-clock latency is bounded by the slowest device rather than their sum
+  (subject to Ollama's own per-model request queue).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import ollama
@@ -56,18 +61,22 @@ class AgentError(RuntimeError):
     """Raised when model output cannot be turned into a valid AgentResponse."""
 
 
-def _decide_device(model: str, base_user_msg: str, phone: str) -> DeviceDecision:
+async def _decide_device(
+    client: ollama.AsyncClient, model: str, base_user_msg: str, phone: str
+) -> DeviceDecision:
     """Run one device through the model, with a single retry on bad output.
 
     Retries exactly once (with an appended reminder) if the response fails JSON
     parsing OR Pydantic validation, then raises AgentError — never silently
-    dropping the device or swallowing the error.
+    dropping the device or swallowing the error. The two attempts for one device
+    are sequential (the retry depends on the first failure), but this coroutine
+    is run concurrently across devices by ``call_agent``.
     """
     user_msg = base_user_msg
     last_error: str | None = None
 
     for _attempt in (1, 2):
-        response = ollama.chat(
+        response = await client.chat(
             model=model,
             # No system message on purpose — the Modelfile's SYSTEM covers it.
             messages=[{"role": "user", "content": user_msg}],
@@ -95,8 +104,8 @@ def _decide_device(model: str, base_user_msg: str, phone: str) -> DeviceDecision
     )
 
 
-def call_agent(request: AgentRequest) -> AgentResponse:
-    """Triage one zone batch: one DeviceDecision per device, in request order."""
+async def call_agent(request: AgentRequest) -> AgentResponse:
+    """Triage one zone batch: one DeviceDecision per device, run concurrently."""
     disaster = request.disaster_type
     try:
         model = _MODEL_BY_DISASTER[disaster]
@@ -104,12 +113,29 @@ def call_agent(request: AgentRequest) -> AgentResponse:
     except KeyError:  # pragma: no cover - Literal type already constrains this
         raise AgentError(f"unsupported disaster_type {disaster!r}") from None
 
-    decisions: list[DeviceDecision] = []
-    for device in request.devices:
+    async def _one(device) -> DeviceDecision:
         # Single-device sub-request so the builder emits exactly one device block.
         single_request = request.model_copy(update={"devices": [device]})
         base_user_msg = build_prompt(single_request)
-        decisions.append(_decide_device(model, base_user_msg, device.phone))
+        return await _decide_device(client, model, base_user_msg, device.phone)
+
+    # Fire every device's call at once and await them together. gather keeps the
+    # order of the coroutines it is given, so results[i] lines up with
+    # request.devices[i] — the ordered reconciliation below still holds.
+    async with ollama.AsyncClient() as client:
+        results = await asyncio.gather(
+            *(_one(device) for device in request.devices),
+            return_exceptions=True,
+        )
+
+    # Raise the FIRST failure in device order — matching the old serial loop,
+    # which stopped at the first device that failed rather than the first to
+    # finish. (gather with return_exceptions keeps every sibling running, so a
+    # later device's error never pre-empts an earlier one.)
+    for res in results:
+        if isinstance(res, BaseException):
+            raise res
+    decisions: list[DeviceDecision] = list(results)  # type: ignore[arg-type]
 
     # Reconcile: every request phone must have its decision, same order, no
     # extras. A direct ordered compare catches missing, unexpected, and reorders.

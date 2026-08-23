@@ -16,6 +16,7 @@ Run: .venv/bin/python tests/live_notconnected.py   (from the repo root)
 """
 from __future__ import annotations
 
+import asyncio
 import pathlib
 import sys
 
@@ -65,7 +66,7 @@ CASES = [
 def main() -> int:
     fails = 0
     for label, req, allowed in CASES:
-        d = call_agent(req).decisions[0]
+        d = asyncio.run(call_agent(req)).decisions[0]
         # For NOT_CONNECTED, the rule also requires an empty sms_message.
         nc = req.devices[0].reachability_status == "NOT_CONNECTED"
         action_ok = d.action in allowed
