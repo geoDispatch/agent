@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
+import httpx
 import ollama
 from pydantic import ValidationError
 
@@ -57,6 +59,30 @@ _RESCUE_ACTIONS = ("rescue_flag", "both")
 _SMS_ACTIONS = ("sms", "both")
 
 
+def _ollama_timeout() -> httpx.Timeout:
+    """Timeout for every Ollama HTTP call — the missing guard against a HANG.
+
+    ``ollama.AsyncClient()`` defaults to ``timeout=None`` (httpx reads that as
+    *no* timeout), so a model that connects but never finishes generating would
+    hang ``/decide`` forever. We split the budget:
+
+    * **connect** short (default 5 s) — if Ollama is down / restarting, the call
+      fails fast with a ConnectError instead of blocking, and the request
+      surfaces as a clean 500.
+    * **read** generous (default 240 s) — a cold model load plus generation can
+      legitimately take ~110 s (see docs/README "Latency"), so the read budget
+      must clear the slowest honest single-device call with headroom, or we'd
+      kill real work.
+
+    Both are overridable via env (``GEODISPATCH_OLLAMA_CONNECT_TIMEOUT`` /
+    ``GEODISPATCH_OLLAMA_READ_TIMEOUT``) so tests can force a fast timeout and
+    ops can tune per box without a code change.
+    """
+    connect = float(os.getenv("GEODISPATCH_OLLAMA_CONNECT_TIMEOUT", "5"))
+    read = float(os.getenv("GEODISPATCH_OLLAMA_READ_TIMEOUT", "240"))
+    return httpx.Timeout(connect=connect, read=read, write=10.0, pool=connect)
+
+
 class AgentError(RuntimeError):
     """Raised when model output cannot be turned into a valid AgentResponse."""
 
@@ -76,12 +102,24 @@ async def _decide_device(
     last_error: str | None = None
 
     for _attempt in (1, 2):
-        response = await client.chat(
-            model=model,
-            # No system message on purpose — the Modelfile's SYSTEM covers it.
-            messages=[{"role": "user", "content": user_msg}],
-            format="json",  # constrain the decoder to emit valid JSON
-        )
+        try:
+            response = await client.chat(
+                model=model,
+                # No system message on purpose — the Modelfile's SYSTEM covers it.
+                messages=[{"role": "user", "content": user_msg}],
+                format="json",  # constrain the decoder to emit valid JSON
+            )
+        except (httpx.HTTPError, ollama.ResponseError, ConnectionError, TimeoutError) as exc:
+            # Transport / server-side failure. Note ollama re-wraps a refused
+            # connection as a *builtin* ConnectionError (not httpx.ConnectError),
+            # so we catch that too; timeouts arrive as httpx.TimeoutException
+            # (an httpx.HTTPError). Retrying the identical call against a dead or
+            # hung server only doubles the wait, so we fail fast here; call_agent
+            # propagates it and the route turns it into a clean 500 (the app
+            # stays up for the next request).
+            raise AgentError(
+                f"Ollama call failed for device {phone} on model {model!r}: {exc!r}"
+            ) from exc
         content = response["message"]["content"]
 
         try:
@@ -122,7 +160,7 @@ async def call_agent(request: AgentRequest) -> AgentResponse:
     # Fire every device's call at once and await them together. gather keeps the
     # order of the coroutines it is given, so results[i] lines up with
     # request.devices[i] — the ordered reconciliation below still holds.
-    async with ollama.AsyncClient() as client:
+    async with ollama.AsyncClient(timeout=_ollama_timeout()) as client:
         results = await asyncio.gather(
             *(_one(device) for device in request.devices),
             return_exceptions=True,
