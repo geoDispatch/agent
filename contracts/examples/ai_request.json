@@ -1,0 +1,197 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai_request",
+  "title": "AgentRequest",
+  "description": "Go supervisor → Python AI agent. Sent per zone batch. Endpoint: POST http://localhost:5000/decide",
+  "type": "object",
+  "required": [
+    "event_id",
+    "disaster_type",
+    "severity",
+    "aftershock_risk",
+    "tsunami_risk",
+    "zone",
+    "batch_index",
+    "devices",
+    "nearest_shelters",
+    "network_status"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Unique disaster event identifier",
+      "example": "EQ-2024-001"
+    },
+    "disaster_type": {
+      "type": "string",
+      "enum": ["earthquake", "flood", "heatwave"]
+    },
+    "severity": {
+      "type": "number",
+      "description": "Richter magnitude (earthquake) or equivalent severity scale",
+      "minimum": 0,
+      "maximum": 10,
+      "example": 6.8
+    },
+    "aftershock_risk": {
+      "type": "string",
+      "enum": ["LOW", "MEDIUM", "HIGH"]
+    },
+    "tsunami_risk": {
+      "type": "boolean"
+    },
+    "zone": {
+      "type": "string",
+      "enum": ["red", "orange", "green"],
+      "description": "Which zone this entire batch belongs to — one zone per request"
+    },
+    "batch_index": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Sequential batch number, 0-based. Multiple batches per zone possible."
+    },
+    "devices": {
+      "type": "array",
+      "description": "All triaged devices in this zone batch (up to 20 per batch)",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/TriagedDevice"
+      }
+    },
+    "nearest_shelters": {
+      "type": "array",
+      "description": "Up to 3 nearest shelters to the epicenter, sorted by distance",
+      "minItems": 0,
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/definitions/Shelter"
+      }
+    },
+    "network_status": {
+      "$ref": "#/definitions/NetworkStatus"
+    }
+  },
+  "definitions": {
+    "Coordinates": {
+      "type": "object",
+      "required": ["latitude", "longitude"],
+      "additionalProperties": false,
+      "properties": {
+        "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+        "longitude": { "type": "number", "minimum": -180, "maximum": 180 }
+      }
+    },
+    "TriagedDevice": {
+      "type": "object",
+      "required": [
+        "phone", "latitude", "longitude", "location_radius_m",
+        "last_location_time", "reachability_status", "last_status_time",
+        "zone", "distance_km"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "phone": {
+          "type": "string",
+          "pattern": "^\\+[1-9]\\d{1,14}$",
+          "example": "+212612345678"
+        },
+        "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+        "longitude": { "type": "number", "minimum": -180, "maximum": 180 },
+        "location_radius_m": { "type": "number", "minimum": 0 },
+        "last_location_time": { "type": "string", "format": "date-time" },
+        "reachability_status": {
+          "type": "string",
+          "enum": ["CONNECTED_DATA", "CONNECTED_SMS", "NOT_CONNECTED"]
+        },
+        "last_status_time": { "type": "string", "format": "date-time" },
+        "zone": { "type": "string", "enum": ["red", "orange", "green"] },
+        "distance_km": { "type": "number", "minimum": 0 }
+      }
+    },
+    "Shelter": {
+      "type": "object",
+      "required": ["name", "address", "location", "distance_km", "capacity"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "example": "École Ibn Battouta" },
+        "address": { "type": "string", "example": "Rue 14, Hay Riad, Rabat" },
+        "location": { "$ref": "#/definitions/Coordinates" },
+        "distance_km": { "type": "number", "minimum": 0, "example": 1.2 },
+        "capacity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum number of people the shelter can hold",
+          "example": 300
+        }
+      }
+    },
+    "NetworkStatus": {
+      "type": "object",
+      "required": ["congestion_level", "sms_delivery_rate", "qos_status"],
+      "additionalProperties": false,
+      "properties": {
+        "congestion_level": {
+          "type": "string",
+          "enum": ["LOW", "MEDIUM", "HIGH", "CRITICAL", "UNKNOWN"]
+        },
+        "sms_delivery_rate": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Estimated SMS delivery success rate",
+          "example": 0.72
+        },
+        "qos_status": {
+          "type": "string",
+          "enum": ["inactive", "requested", "active", "failed"]
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "EQ-2024-001",
+      "disaster_type": "earthquake",
+      "severity": 6.8,
+      "aftershock_risk": "HIGH",
+      "tsunami_risk": false,
+      "zone": "red",
+      "batch_index": 0,
+      "devices": [
+        {
+          "phone": "+212612345678",
+          "latitude": 33.9716,
+          "longitude": -6.8498,
+          "location_radius_m": 500,
+          "last_location_time": "2024-11-14T10:30:00Z",
+          "reachability_status": "CONNECTED_SMS",
+          "last_status_time": "2024-11-14T10:29:45Z",
+          "zone": "red",
+          "distance_km": 3.7
+        }
+      ],
+      "nearest_shelters": [
+        {
+          "name": "École Ibn Battouta",
+          "address": "Rue 14, Hay Riad, Rabat",
+          "location": { "latitude": 33.9800, "longitude": -6.8600 },
+          "distance_km": 1.2,
+          "capacity": 300
+        },
+        {
+          "name": "Complexe Sportif Al Amal",
+          "address": "Avenue Hassan II, Rabat",
+          "location": { "latitude": 33.9850, "longitude": -6.8550 },
+          "distance_km": 2.1,
+          "capacity": 500
+        }
+      ],
+      "network_status": {
+        "congestion_level": "HIGH",
+        "sms_delivery_rate": 0.72,
+        "qos_status": "active"
+      }
+    }
+  ]
+}

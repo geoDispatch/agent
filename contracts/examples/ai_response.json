@@ -1,0 +1,147 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ai_response",
+  "title": "AgentResponse",
+  "description": "Python AI agent → Go supervisor. Go acts on this immediately for dispatch and dashboard updates. One response per zone batch.",
+  "type": "object",
+  "required": [
+    "event_id",
+    "zone",
+    "decisions",
+    "gov_narrative",
+    "request_qos",
+    "confidence"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Must match the event_id from the corresponding AgentRequest",
+      "example": "EQ-2024-001"
+    },
+    "zone": {
+      "type": "string",
+      "enum": ["red", "orange", "green"],
+      "description": "Zone batch this response covers — must match the request zone"
+    },
+    "decisions": {
+      "type": "array",
+      "description": "One DeviceDecision per device in the request batch, in any order",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/definitions/DeviceDecision"
+      }
+    },
+    "gov_narrative": {
+      "type": "string",
+      "description": "Situation report for the government dashboard. Plain text, factual, no PII. Shown to officials.",
+      "minLength": 1,
+      "example": "Red zone: 12 devices detected within 5km of epicenter. Network congestion HIGH. 9 reachable via SMS, 3 unreachable flagged for rescue. QoS boost requested."
+    },
+    "request_qos": {
+      "type": "boolean",
+      "description": "If true, Go will call CAMARA QoS on Demand API to boost network priority for this zone"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "description": "AI confidence in this batch's overall decision set",
+      "example": 0.91
+    }
+  },
+  "definitions": {
+    "DeviceDecision": {
+      "type": "object",
+      "required": [
+        "phone",
+        "zone_confirmed",
+        "zone_escalated",
+        "action",
+        "sms_message",
+        "rescue_priority",
+        "confidence",
+        "reasoning"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "phone": {
+          "type": "string",
+          "pattern": "^\\+[1-9]\\d{1,14}$",
+          "description": "E.164 phone — must match a phone in the request devices list",
+          "example": "+212612345678"
+        },
+        "zone_confirmed": {
+          "type": "string",
+          "enum": ["red", "orange", "green"],
+          "description": "AI-confirmed zone. May differ from Go's zone only if zone_escalated=true"
+        },
+        "zone_escalated": {
+          "type": "boolean",
+          "description": "true if AI upgraded the zone (e.g. orange→red). Go logs this for audit."
+        },
+        "action": {
+          "type": "string",
+          "enum": ["sms", "rescue_flag", "both", "none"],
+          "description": "'sms' = send SMS only | 'rescue_flag' = flag for rescue only | 'both' = SMS + rescue | 'none' = no action"
+        },
+        "sms_message": {
+          "type": "string",
+          "description": "Exact SMS text to send. Empty string if action is 'rescue_flag' or 'none'. Max 160 chars for single SMS.",
+          "maxLength": 320,
+          "example": "ALERTE: Séisme détecté. Évacuez immédiatement vers École Ibn Battouta (1.2km nord). Évitez les bâtiments endommagés."
+        },
+        "rescue_priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "1=highest rescue urgency, 0=not flagged for rescue. Higher = dispatched first.",
+          "example": 1
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "description": "Per-device decision confidence",
+          "example": 0.87
+        },
+        "reasoning": {
+          "type": "string",
+          "description": "Internal audit log — AI's reasoning chain. NEVER shown to end users or sent via SMS.",
+          "example": "Device unreachable via data/SMS, located in red zone collapse risk area, high aftershock risk — escalating to rescue_flag priority 1."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "EQ-2024-001",
+      "zone": "red",
+      "decisions": [
+        {
+          "phone": "+212612345678",
+          "zone_confirmed": "red",
+          "zone_escalated": false,
+          "action": "sms",
+          "sms_message": "ALERTE: Séisme détecté. Évacuez vers École Ibn Battouta (1.2km nord). Évitez les bâtiments endommagés.",
+          "rescue_priority": 0,
+          "confidence": 0.87,
+          "reasoning": "Device reachable via SMS, located in red zone. Standard evacuation SMS sent. Shelter 1.2km away, capacity available."
+        },
+        {
+          "phone": "+212698765432",
+          "zone_confirmed": "red",
+          "zone_escalated": false,
+          "action": "rescue_flag",
+          "sms_message": "",
+          "rescue_priority": 1,
+          "confidence": 0.93,
+          "reasoning": "Device NOT_CONNECTED. Location within 2km of epicenter. High collapse risk zone. Cannot reach via any channel — rescue dispatch required."
+        }
+      ],
+      "gov_narrative": "Red zone: 2 devices processed. 1 reachable via SMS — evacuation message sent. 1 unreachable (NOT_CONNECTED) in high-collapse-risk area — rescue team dispatched. QoS boost requested to improve SMS delivery in congested area.",
+      "request_qos": true,
+      "confidence": 0.90
+    }
+  ]
+}
