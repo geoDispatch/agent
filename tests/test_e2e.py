@@ -16,15 +16,24 @@ the model's baked-in default (bilingual AR+FR). This test therefore exercises
 every STRUCTURED dimension the contract exposes; language coverage lives in
 test_quality.py.
 
-Run:  .venv/bin/python test_e2e.py
+Run:  .venv/bin/python tests/test_e2e.py   (from the repo root)
 """
 from __future__ import annotations
 
 import datetime as dt
 import pathlib
 import statistics
+import sys
 import time
 from collections import defaultdict
+
+# This test lives in tests/ but imports repo-root modules (main, models.schemas)
+# and writes docs/CHANGELOG.md at the repo root. Run as `python3 tests/test_e2e.py`
+# sys.path[0] is tests/, NOT the repo root, so imports would fail — put the repo
+# root (this file's parent's parent) on sys.path before importing them.
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -32,7 +41,9 @@ from pydantic import ValidationError
 from main import app
 from models.schemas import AgentRequest, AgentResponse
 
-CHANGELOG = pathlib.Path("docs/CHANGELOG.md")
+# Anchor to the repo root so appends always land in <root>/docs/CHANGELOG.md,
+# independent of the caller's working directory.
+CHANGELOG = REPO_ROOT / "docs" / "CHANGELOG.md"
 TODAY = dt.date.today().isoformat()
 _T = "2026-08-23T09:15:00Z"     # fixed timestamps (contract needs date-time; value is inert)
 

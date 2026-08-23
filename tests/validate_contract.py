@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Validate the locked contract examples against models/schemas.py.
 
-Run:  python3 validate_contract.py
+Run:  python3 tests/validate_contract.py   (from the repo root)
 Exits non-zero on any failure, so it can gate CI / a go-no-go check.
 
-If contracts/examples/ai_request.json / ai_response.json exist, they are
-validated directly. If they are missing, this falls back to a contract-shaped
-fixture (using the coords from the contract example) and says so LOUDLY — a
+contracts/examples/ai_request.json / ai_response.json are JSON Schema
+documents ($schema, title, properties, definitions, ...), NOT instances — the
+real payloads live in their top-level "examples" array. So we validate every
+entry in examples[] (per-example pass/fail), not the schema envelope. If a file
+is missing, this falls back to a contract-shaped fixture and says so LOUDLY — a
 fallback pass does NOT prove the real payloads parse.
 """
 import json
@@ -15,10 +17,18 @@ import sys
 
 from pydantic import ValidationError
 
+# This script lives in tests/ but imports the repo-root `models` package and
+# reads contracts/examples/*.json at the repo root. Run as
+# `python3 tests/validate_contract.py`, sys.path[0] is tests/, not the repo
+# root — add the repo root (this file's parent's parent) before importing.
+REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from models import AgentRequest, AgentResponse, Shelter
 
-REQ_PATH = pathlib.Path("contracts/examples/ai_request.json")
-RESP_PATH = pathlib.Path("contracts/examples/ai_response.json")
+REQ_PATH = REPO_ROOT / "contracts" / "examples" / "ai_request.json"
+RESP_PATH = REPO_ROOT / "contracts" / "examples" / "ai_response.json"
 
 REQ_FIXTURE = {
     "event_id": "evt-demo-001", "disaster_type": "earthquake", "severity": 8.2,
@@ -48,34 +58,50 @@ RESP_FIXTURE = {
 }
 
 
-def load(path, fixture):
+def load_examples(path, fixture):
+    """Return (list_of_instances, source_label).
+
+    The contract files are JSON Schema documents; the actual instances to
+    validate live in their top-level "examples" array — return that list so the
+    caller can validate every example. If the file exists but has no examples[]
+    array, return the document itself (so it fails loudly rather than silently
+    passing). If the file is missing, fall back to the contract-shaped fixture.
+    """
     if path.exists():
-        return json.loads(path.read_text()), f"REAL FILE {path}"
-    return fixture, f"FIXTURE (!! {path} not found — contract-shaped fallback)"
+        doc = json.loads(path.read_text())
+        examples = doc.get("examples")
+        if isinstance(examples, list) and examples:
+            return examples, f"REAL FILE {path} (examples[0..{len(examples) - 1}])"
+        return [doc], f"REAL FILE {path} (!! no examples[] array — validating document as-is)"
+    return [fixture], f"FIXTURE (!! {path} not found — contract-shaped fallback)"
 
 
 def main():
     print(f"pydantic import OK; python {sys.version.split()[0]}")
     ok = True
 
-    req_data, req_src = load(REQ_PATH, REQ_FIXTURE)
-    resp_data, resp_src = load(RESP_PATH, RESP_FIXTURE)
+    req_examples, req_src = load_examples(REQ_PATH, REQ_FIXTURE)
+    resp_examples, resp_src = load_examples(RESP_PATH, RESP_FIXTURE)
 
-    try:
-        r = AgentRequest.model_validate(req_data)
-        print(f"OK  AgentRequest   [{req_src}]")
-        print(f"    shelter.location -> {r.nearest_shelters[0].location.model_dump()}")
-    except ValidationError as e:
-        ok = False
-        print(f"FAIL AgentRequest  [{req_src}]\n{e}")
+    print(f"AgentRequest   [{req_src}]  — {len(req_examples)} example(s)")
+    for i, ex in enumerate(req_examples):
+        try:
+            r = AgentRequest.model_validate(ex)
+            loc = r.nearest_shelters[0].location.model_dump() if r.nearest_shelters else "(no shelters)"
+            print(f"  OK  example[{i}]  event_id={r.event_id!r}  devices={len(r.devices)}  shelter[0].location -> {loc}")
+        except ValidationError as e:
+            ok = False
+            print(f"  FAIL example[{i}]\n{e}")
 
-    try:
-        resp = AgentResponse.model_validate(resp_data)
-        print(f"OK  AgentResponse  [{resp_src}]")
-        print(f"    rescue_priority = {resp.decisions[0].rescue_priority} (1 = HIGHEST per contract)")
-    except ValidationError as e:
-        ok = False
-        print(f"FAIL AgentResponse [{resp_src}]\n{e}")
+    print(f"AgentResponse  [{resp_src}]  — {len(resp_examples)} example(s)")
+    for i, ex in enumerate(resp_examples):
+        try:
+            resp = AgentResponse.model_validate(ex)
+            print(f"  OK  example[{i}]  event_id={resp.event_id!r}  decisions={len(resp.decisions)}  "
+                  f"rescue_priority[0]={resp.decisions[0].rescue_priority} (1 = HIGHEST per contract)")
+        except ValidationError as e:
+            ok = False
+            print(f"  FAIL example[{i}]\n{e}")
 
     # Prove the rename: new names accepted, old lat/lon rejected by extra="forbid".
     base = {"name": "S", "address": "A", "distance_km": 0.5, "capacity": 100}
