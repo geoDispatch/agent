@@ -256,9 +256,9 @@ def _report(results: list[dict], changelog_rows: list[tuple[str, str, str, str]]
     summary_note = (
         f"{passed}/{total} passed; batch latency avg {avg_ms / 1000:.0f}s, max {max_ms / 1000:.0f}s; "
         f"~{per_dev_ms / 1000:.0f}s per device over {posted_devices} device calls. "
-        "KNOWN LATENCY RISK: /decide makes one blocking model call per device on CPU, so batch "
-        "latency scales linearly with device count — Week 2 must investigate concurrent per-device "
-        "calls or batching."
+        "KNOWN LATENCY RISK: single-device cold latency ~83s (one blocking model call per device on "
+        "CPU; batch latency scales linearly with device count) — Week 2 to investigate concurrent "
+        "per-device calls or batching."
     )
     append_changelog(changelog_rows, summary_note)
 
