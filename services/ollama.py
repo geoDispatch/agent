@@ -83,6 +83,29 @@ def _ollama_timeout() -> httpx.Timeout:
     return httpx.Timeout(connect=connect, read=read, write=10.0, pool=connect)
 
 
+def _max_inflight() -> int:
+    """How many Ollama calls ``call_agent`` keeps in flight at once.
+
+    Default **1**. This box runs Ollama with ``OLLAMA_MAX_LOADED_MODELS=1`` and
+    no ``OLLAMA_NUM_PARALLEL`` override, so same-model requests are serialized
+    server-side regardless of how many we send. Firing a whole batch at once
+    therefore does NOT speed anything up — it just parks the tail requests on
+    open HTTP connections, where each one's ``read`` timeout counts down while
+    it waits behind the queue. At the schema ceiling of 20 devices that tail
+    wait exceeds the 240 s read timeout and the batch dies with a ReadTimeout.
+
+    Bounding in-flight calls to 1 means a request is only *sent* once the prior
+    one returns, so its timeout only ever has to cover its own honest latency.
+    Raise ``GEODISPATCH_OLLAMA_MAX_INFLIGHT`` in lockstep with a raised
+    ``OLLAMA_NUM_PARALLEL`` (and the RAM to back it) to get real overlap.
+    """
+    try:
+        n = int(os.getenv("GEODISPATCH_OLLAMA_MAX_INFLIGHT", "1"))
+    except ValueError:
+        n = 1
+    return max(1, n)
+
+
 class AgentError(RuntimeError):
     """Raised when model output cannot be turned into a valid AgentResponse."""
 
@@ -155,11 +178,16 @@ async def call_agent(request: AgentRequest) -> AgentResponse:
         # Single-device sub-request so the builder emits exactly one device block.
         single_request = request.model_copy(update={"devices": [device]})
         base_user_msg = build_prompt(single_request)
-        return await _decide_device(client, model, base_user_msg, device.phone)
+        # Semaphore-gated: only _max_inflight() calls are actually sent to Ollama
+        # at once (default 1). This is what keeps a 20-device batch from tripping
+        # the per-request read timeout — see _max_inflight() for the full why.
+        async with sem:
+            return await _decide_device(client, model, base_user_msg, device.phone)
 
-    # Fire every device's call at once and await them together. gather keeps the
-    # order of the coroutines it is given, so results[i] lines up with
-    # request.devices[i] — the ordered reconciliation below still holds.
+    # Gather keeps the order of the coroutines it is given, so results[i] lines
+    # up with request.devices[i] — the ordered reconciliation below still holds.
+    # The semaphore (not gather) is what bounds how many hit Ollama at once.
+    sem = asyncio.Semaphore(_max_inflight())
     async with ollama.AsyncClient(timeout=_ollama_timeout()) as client:
         results = await asyncio.gather(
             *(_one(device) for device in request.devices),

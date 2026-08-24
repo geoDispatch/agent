@@ -15,7 +15,7 @@ Pass criteria:
 
 Needs Ollama + models. Wall time ~= 3x single-device latency (serialized).
 
-Run: .venv/bin/python tests/test_concurrent_decide.py   (from the repo root)
+Run: .venv/bin/python tests/test_concurrent.py   (from the repo root)
 """
 from __future__ import annotations
 

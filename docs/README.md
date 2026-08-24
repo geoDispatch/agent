@@ -103,9 +103,40 @@ Run all of these from the **repo root**. The three Ollama-backed ones need Ollam
 
 Be aware of these before filing them as bugs:
 
-- **Latency (CPU-only).** Each device is one blocking model call, run in series, so a single decision takes **~20–110 s** (cold model load is the slow end) and batch latency scales linearly with device count. This is a known **Week 2** item (per-device concurrency / batching) — not a bug to report.
+- **Latency is a hardware ceiling (~20–110 s/device), not a missing optimization.** Each device is one blocking model call and batch latency scales linearly with device count. Per-device **concurrency was tried and reverted**: setting `OLLAMA_NUM_PARALLEL=2` (to let Ollama process device calls in parallel) was **confirmed non-viable on this box** — free RAM collapsed to **~191 MB with ~5 GB of swap within seconds** (two ~1.9 GB model instances resident at once on a 7.6 GB machine). The async client (`ollama.AsyncClient` + `asyncio.gather`) is still in place and correct; it is simply **inert on this hardware** — same-model calls serialize server-side, so firing them concurrently doesn't overlap — and becomes a real win only on a box with more RAM/GPU. So the latency is a measured hardware limit, not an un-attempted improvement — don't file it as a bug.
 - **No language/locale field** in the contract yet. SMS defaults to **bilingual Arabic + French**.
 - **Broken Ollama install.** If `ollama run` fails with `llama-server binary not found`, your Ollama install is partial/broken. Reinstall via the official script (Prerequisites) — do **not** try to fix a source build by hand.
+
+## Fault tolerance
+
+The `/decide` pipeline is built to fail cleanly rather than hang or crash the process:
+
+- **Ollama request timeout.** Every model call runs under an `httpx` timeout — **connect 5 s** (a down or restarting Ollama fails fast) and **read 240 s** (generous enough to clear a cold model load plus generation, which can take ~110 s). Without it, a hung Ollama would block `/decide` forever. Both are env-overridable:
+  ```bash
+  export GEODISPATCH_OLLAMA_CONNECT_TIMEOUT=5     # seconds, default 5
+  export GEODISPATCH_OLLAMA_READ_TIMEOUT=240      # seconds, default 240
+  ```
+  When Ollama is down, times out, or returns unparseable output even after the one built-in retry, `/decide` returns a clean **500** (the full traceback is logged server-side only, never sent to the caller) and the app stays up for the next request.
+- **Bounded in-flight calls.** `call_agent` sends at most `GEODISPATCH_OLLAMA_MAX_INFLIGHT` model calls at once (**default 1**, matching this box's serialized Ollama). This stops a large batch from parking many requests on open connections where they would trip the read timeout while queued behind each other — a 20-device batch fails that way otherwise. Raise it in lockstep with `OLLAMA_NUM_PARALLEL` on hardware that can actually parallelize.
+
+**Robustness tests.** Run from the **repo root**, same conventions as the Testing section:
+
+- **`tests/test_faults.py`** — fault injection: points the app at a dead port (connection refused) and at a black-hole port (accepts, never replies), confirming `/decide` returns a clean **500** — fast on refusal, via the read timeout on a hang (not an infinite hang) — and stays up for the next request. **No Ollama needed** (the point is that Ollama is broken/absent).
+  ```bash
+  .venv/bin/python tests/test_faults.py
+  ```
+- **`tests/test_semantic_garbage.py`** — schema-valid but semantically nonsensical input (empty/whitespace strings, contradictory reachability/zone/distance combos); confirms `call_agent` survives without crashing and still returns a valid `AgentResponse`. **Needs Ollama.**
+  ```bash
+  .venv/bin/python tests/test_semantic_garbage.py
+  ```
+- **`tests/test_concurrent.py`** — fires 3 overlapping `/decide` requests at a real uvicorn server; confirms the app stays stable under concurrent load with no cross-talk between requests (each response matches its own request). Stability test, **not** a speed test. **Needs Ollama.**
+  ```bash
+  .venv/bin/python tests/test_concurrent.py
+  ```
+- **`tests/test_max_devices.py`** — runs the schema-max **20-device** batch through `call_agent`; confirms nothing is truncated and all 20 phones reconcile 1:1 and in order. **Needs Ollama.** ⏱️ ~12 min (serialized), not a hang.
+  ```bash
+  .venv/bin/python tests/test_max_devices.py
+  ```
 
 ## Troubleshooting
 
