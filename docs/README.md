@@ -1,5 +1,28 @@
 # GeoDispatch AI Agent — Setup Guide
 
+## Quick Start (new teammate)
+
+A `Makefile` at the repo root wraps every command in this guide so you don't
+have to memorize them. Fastest path from a fresh clone to a running server:
+
+```bash
+make setup     # create .venv + install deps, pull qwen2.5:3b, build the 3 geodispatch-* models
+make run       # start the FastAPI server on http://localhost:8000
+```
+
+`make setup` already runs `make build-models`, so there's no separate build step.
+On a low-RAM box (≤8 GB) also run `make ollama-config` **once** (needs sudo) to cap
+Ollama to a single resident model — see the RAM constraint under Prerequisites.
+Run `make help` to list every target (setup, run, health, the individual `test-*`
+targets, cleanup). Quick sanity check after a change: `make test-quick`.
+
+> Ollama must be running for `make setup`/`make run` (the Makefile checks and
+> tells you if it isn't). If any step fails, fall back to the detailed manual
+> steps below to debug one piece at a time — each `make` target just runs the
+> documented command shown here.
+
+---
+
 ## What this is
 
 GeoDispatch is a Python AI agent built for the **GSMA MENA Ignite Hackathon**. It triages disaster-response device batches (earthquake, flood, heatwave) by running each device through a **local LLM** (Ollama, `qwen2.5:3b` base with three hazard-specific system prompts) and returns a structured per-device decision — SMS, physical-rescue flag, both, or none — plus a government-facing summary. It exposes a single FastAPI endpoint, `POST /decide`, that takes one validated zone batch and returns validated decisions. Everything runs on-device: no cloud model calls, no data leaves the machine.
