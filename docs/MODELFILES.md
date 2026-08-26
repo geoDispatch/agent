@@ -19,8 +19,9 @@ ollama create geodispatch-heatwave   -f modelfiles/Modelfile.heatwave
 ## Shared across all three
 
 Every Modelfile is `FROM qwen2.5`, sets `PARAMETER temperature 0.2` (life-safety
-structured output, not creative writing — low temperature for determinism), and
-carries the same operative contract in its `SYSTEM` prompt:
+structured output, not creative writing — low temperature for determinism) and
+`PARAMETER num_predict 150` (hard cap on generated tokens), and carries the same
+operative contract in its `SYSTEM` prompt:
 
 - **Input is structured, not free text.** The model triages one `TriagedDevice`
   (JSON) at a time; `zone` was set by the upstream Go service and must never be
@@ -41,6 +42,20 @@ carries the same operative contract in its `SYSTEM` prompt:
   devices (dispatch LAST). Lower the number toward 1 as danger rises.
 - **`confidence`** 0–1; **`reasoning`** is one short internal audit sentence,
   never shown to users or sent via SMS.
+
+### Generation cap — `num_predict 150`
+
+`reasoning` is internal-only, so it never needs to be long. `PARAMETER
+num_predict 150` bounds the tokens the model may generate per decision. Measured
+real decisions land at ~88–126 tokens (full JSON object incl. `sms_message` +
+`reasoning`), so 150 leaves headroom and does **not** truncate valid output —
+verified across `test_quality.py` (10/10) and `live_notconnected.py` (4/4) with
+the cap live. It is a ceiling, not a routine speedup: typical calls already stop
+below it (via EOS), so median latency is unchanged; the cap's job is to bound the
+worst case — a rare ramble can't inflate `/decide` latency or run past the JSON
+close and produce unparseable output. If the bilingual Arabic+French SMS default
+(see below) ever produces long `both`/`sms` messages, re-check this headroom —
+Arabic is token-heavy — and raise the cap if needed.
 
 The shared block is intentionally repeated verbatim inside each `SYSTEM` prompt
 because the model only ever sees its own prompt — Ollama has no include

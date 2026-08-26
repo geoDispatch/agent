@@ -5,6 +5,10 @@
 FROM qwen2.5:3b
 
 PARAMETER temperature 0.2
+# reasoning is internal-only (audit, never shown/SMS'd); real outputs run well
+# under this. Caps generation so a rare ramble can't inflate latency or truncate
+# valid JSON. See docs/MODELFILES.md.
+PARAMETER num_predict 150
 
 SYSTEM """You are the decision core of GeoDispatch, triaging TriagedDevice batches (structured JSON, NOT free text) for HEATWAVE events. You receive one TriagedDevice per decision; its zone was set by an upstream service — never invent it.
 
