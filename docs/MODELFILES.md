@@ -16,6 +16,10 @@ ollama create geodispatch-flood      -f modelfiles/Modelfile.flood
 ollama create geodispatch-heatwave   -f modelfiles/Modelfile.heatwave
 ```
 
+`modelfiles/` also holds one **experimental** file that is deliberately *not*
+part of that build — see [Experimental](#experimental--not-for-production) at the
+bottom.
+
 ## Shared across all three
 
 Every Modelfile is `FROM qwen2.5`, sets `PARAMETER temperature 0.2` (life-safety
@@ -81,3 +85,20 @@ in all three if the decision lands elsewhere.
 - **heatwave** — heatwave severity is NOT a Richter-style magnitude; treat
   `severity` as a general 0–10 danger scale (higher = more dangerous) when
   setting urgency.
+
+## Experimental — not for production
+
+| File | Model tag | Base |
+|------|-----------|------|
+| `modelfiles/Modelfile.earthquake-test15b.txt` | `geodispatch-earthquake-test15b` | `qwen2.5:1.5b` |
+
+A 1.5B twin of `Modelfile.earthquake`, kept only to measure what the 3B base
+costs in latency (Week 2 perf item). The `.txt` extension and the header banner
+mark it as out-of-band: it is **not** in `make build-models` and must never
+serve `/decide`.
+
+Its `SYSTEM` prompt, `temperature`, and `num_predict` are byte-for-byte copies of
+`Modelfile.earthquake` — the `FROM` line is the only intended difference — so a
+measured behaviour gap is attributable to base model size alone. If
+`Modelfile.earthquake`'s `SYSTEM` prompt changes, either mirror it here or delete
+this file once the size question is settled.
