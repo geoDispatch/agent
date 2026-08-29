@@ -20,6 +20,8 @@ Two deliberate design choices baked in here:
   ``asyncio.gather`` over ``ollama.AsyncClient`` instead of a serial loop, so
   wall-clock latency is bounded by the slowest device rather than their sum
   (subject to Ollama's own per-model request queue).
+
+Where Ollama lives is configuration, not a constant: see ``_ollama_host``.
 """
 
 from __future__ import annotations
@@ -81,6 +83,26 @@ def _ollama_timeout() -> httpx.Timeout:
     connect = float(os.getenv("GEODISPATCH_OLLAMA_CONNECT_TIMEOUT", "5"))
     read = float(os.getenv("GEODISPATCH_OLLAMA_READ_TIMEOUT", "240"))
     return httpx.Timeout(connect=connect, read=read, write=10.0, pool=connect)
+
+
+def _ollama_host() -> str:
+    """Where Ollama lives — read per call, so it is switchable without a redeploy.
+
+    Default ``http://127.0.0.1:11434`` keeps the non-Docker path (the Makefile
+    flow in docs/README.md: systemd Ollama on the same box) working with no env
+    set at all. Under ``docker compose`` the app and Ollama are separate
+    containers, so compose sets ``OLLAMA_HOST=http://ollama:11434`` and the same
+    code reaches the sibling service over the compose network.
+
+    ``ollama.AsyncClient`` would consult ``OLLAMA_HOST`` on its own, but the
+    default was implicit inside the library. Resolving it here makes the
+    localhost fallback explicit and gives the value one documented home.
+
+    Read at call time, not import time, on purpose: ``tests/test_faults.py``
+    re-points ``OLLAMA_HOST`` at a dead / black-hole port between requests in a
+    live process and expects the next call to honour it.
+    """
+    return os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
 
 
 def _max_inflight() -> int:
@@ -188,7 +210,7 @@ async def call_agent(request: AgentRequest) -> AgentResponse:
     # up with request.devices[i] — the ordered reconciliation below still holds.
     # The semaphore (not gather) is what bounds how many hit Ollama at once.
     sem = asyncio.Semaphore(_max_inflight())
-    async with ollama.AsyncClient(timeout=_ollama_timeout()) as client:
+    async with ollama.AsyncClient(host=_ollama_host(), timeout=_ollama_timeout()) as client:
         results = await asyncio.gather(
             *(_one(device) for device in request.devices),
             return_exceptions=True,

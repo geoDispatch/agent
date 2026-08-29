@@ -21,6 +21,10 @@ targets, cleanup). Quick sanity check after a change: `make test-quick`.
 > steps below to debug one piece at a time — each `make` target just runs the
 > documented command shown here.
 
+Don't want to install Ollama and a virtualenv on your machine at all? There's a
+containerized path that needs only Docker — one command, `docker compose up
+--build`. See [Docker](#docker-alternative-to-the-manualmakefile-setup).
+
 ---
 
 ## What this is
@@ -121,6 +125,165 @@ Run all of these from the **repo root**. The three Ollama-backed ones need Ollam
   ```bash
   .venv/bin/python tests/live_notconnected.py
   ```
+
+## Docker (alternative to the manual/Makefile setup)
+
+Prefer not to install Ollama, a virtualenv, and the models by hand? The repo
+ships a two-service Compose stack that does all of it inside containers:
+
+```bash
+docker compose up --build
+```
+
+Then, from another terminal:
+
+```bash
+curl http://localhost:8000/health
+# -> {"status":"ok"}
+
+curl -sS -X POST http://localhost:8000/decide \
+  -H 'Content-Type: application/json' \
+  -d "$(python3 -c 'import json;print(json.dumps(json.load(open("contracts/examples/ai_request.json"))["examples"][0]))')"
+```
+
+That `/decide` takes ~2 minutes to return and is **not** hung — it's one cold
+model load (see Known limitations). Verified against this stack, the earthquake
+example above returns:
+
+```json
+{"event_id":"EQ-2024-001","zone":"red","decisions":[{"phone":"+212612345678",
+"zone_confirmed":"red","zone_escalated":false,"action":"both","sms_message":
+"Aftershocks expected. Leave the building and proceed to École Ibn Battouta for
+shelter. Rescue has been alerted to your location.","rescue_priority":1,
+"confidence":0.9,"reasoning":"Reachable by SMS (CONNECTED_SMS) in a red zone with
+HIGH aftershock risk — send SMS AND flag rescue; dispatch first."}],
+"gov_narrative":"1 of 1 devices in the red zone flagged for rescue; SMS
+dispatched to 1.","request_qos":false,"confidence":0.9}
+```
+
+(`sms_message` and `reasoning` are model-generated, so their wording varies run to
+run; the structure, `action`, `rescue_priority` and `confidence` are stable.)
+
+⏱️ **The first run is slow, and it's almost entirely the download.** Inside the
+container the `ollama` service pulls `qwen2.5:3b` (~1.9 GB) and then builds the
+three `geodispatch-*` models, and the `app` service deliberately waits for all of
+that before it starts. Budget **~20–40 minutes on a healthy link**; on a slow or
+stalling one it can be far worse (see *First run stuck at N% forever* below).
+Nothing is hung — watch progress with `docker compose logs -f ollama`.
+
+**Every run after the first takes seconds.** The models live in a named volume
+(`geodispatch-ollama-models`) and are neither re-downloaded nor rebuilt. Measured
+on this box: `docker compose down` followed by `docker compose up -d --wait`
+brought both services to `healthy` in **12 seconds**. Once warm, a
+single-device `/decide` through the stack took **112 s** — the same
+cold-model-load latency as the Makefile flow (see Known limitations); Docker adds
+nothing measurable to it.
+
+### What the two services are
+
+| Service  | Image                   | Ports                                  | Role |
+|----------|-------------------------|----------------------------------------|------|
+| `ollama` | `ollama/ollama:0.32.15` | `11434` **internal only**              | Runs Ollama; pulls the base model and builds the three hazard models on startup |
+| `app`    | built from `Dockerfile` | `8000` → **published to the host**     | The FastAPI app (`uvicorn main:app`) |
+
+Only port **8000** is published. Ollama's `11434` is reachable from the `app`
+container as `http://ollama:11434` but is *not* exposed to the host — the host
+usually already runs its own Ollama on 11434 for the Makefile flow, and
+publishing would clash with it. To inspect the containerized one:
+
+```bash
+docker compose exec ollama ollama list      # what's built in the volume
+docker compose logs -f ollama               # startup / pull / build progress
+```
+(There's a commented-out `ports:` block in `docker-compose.yml` mapping host
+`11435` if you really need to curl it directly while debugging.)
+
+### Startup ordering is enforced, not hoped for
+
+`app` declares `depends_on: ollama: condition: service_healthy`, and the
+`ollama` healthcheck requires **two** things: the API answering *and* a readiness
+marker that `docker/init-models.sh` writes only after all three
+`geodispatch-*` models exist. Without the second condition Ollama would report
+healthy the moment its port opened and the app's first `/decide` would 500
+against a model that hadn't been built yet.
+
+### Idempotent model provisioning
+
+`docker/init-models.sh` is the `ollama` service's entrypoint. Every startup it
+starts `ollama serve`, waits for the API, then:
+
+- pulls `qwen2.5:3b` **only if** the volume doesn't already have it;
+- builds each `geodispatch-*` model **only if** it's missing or its Modelfile
+  changed (the script records a `sha256` of each Modelfile in the volume).
+
+So re-running `docker compose up` never re-downloads or needlessly rebuilds, and
+editing `modelfiles/Modelfile.flood` then restarting rebuilds **just** that
+model. `modelfiles/` is bind-mounted read-only, which is what makes that loop
+work without a rebuild of the app image. The experimental
+`Modelfile.earthquake-test15b.txt` is deliberately **not** built (see
+[MODELFILES.md](MODELFILES.md)).
+
+### First run stuck at *N*% forever (slow link)? Seed the volume
+
+`ollama pull` splits the 1.9 GB layer into 16 parts and retries stalled ones
+indefinitely. On a link that keeps stalling you'll see the percentage climb, drop
+back, and log `part N stalled; retrying` — it can effectively never finish. That
+happened on this box (the pull sat around 9–33% for over an hour, with the
+progress counter resetting).
+
+If you already have `qwen2.5:3b` in a **host** Ollama (i.e. you ran `make setup`
+before), copy it straight into the volume instead of downloading it twice:
+
+```bash
+docker compose stop ollama
+docker run --rm \
+  -v geodispatch-ollama-models:/dest \
+  -v "$HOME/.ollama/models:/src:ro" \
+  --entrypoint sh ollama/ollama:0.32.15 -c '
+    rm -f /dest/models/blobs/*-partial*
+    mkdir -p /dest/models/blobs /dest/models/manifests
+    cp -a /src/blobs/. /dest/models/blobs/
+    cp -a /src/manifests/. /dest/models/manifests/
+    chown -R root:root /dest/models'
+docker compose up -d --wait
+```
+
+Deleting the `*-partial*` files first matters — a half-written blob is what the
+next pull would otherwise try to resume. The init script then reports
+`base model qwen2.5:3b already present — skipping pull` and goes straight to
+building the three models (~10 s total, no network). This is a shortcut for a bad
+link, not a required step: on a decent connection plain `docker compose up
+--build` needs nothing extra.
+
+### RAM constraint applies here too
+
+The compose file sets `OLLAMA_MAX_LOADED_MODELS=1` on the `ollama` service, for
+exactly the reason documented in Setup step 5 and Known limitations: three
+resident ~1.9 GB models on a 7.6 GB box caused swap-thrashing. In Docker it's
+just an environment variable — **no `sudo`, no systemd override needed**, which
+is the one setup step containerizing genuinely removes. `GEODISPATCH_OLLAMA_*`
+timeout and in-flight knobs are set on the `app` service to the same defaults
+the code uses; they're spelled out in `docker-compose.yml` so they're easy to
+tune per box.
+
+### Everyday commands
+
+```bash
+docker compose up --build          # start (rebuild app image if code changed)
+docker compose up -d --wait        # start detached, return only when both are healthy
+docker compose logs -f app         # app logs (per-request latency lines)
+docker compose down                # stop; KEEPS the model volume
+docker compose down -v             # stop and DELETE models (full re-download!)
+docker compose exec app python -c "import httpx;print(httpx.get('http://ollama:11434/api/tags').json())"
+```
+
+`docker compose down` is the safe one — the named volume survives, so the next
+`up` is a warm start. Only use `-v` if you actually want to re-pull ~1.9 GB.
+
+The Docker path and the Makefile path are independent and can coexist: the app
+reads `OLLAMA_HOST` (compose sets `http://ollama:11434`) and falls back to
+`http://127.0.0.1:11434` when unset, so `make setup` / `make run` against a host
+Ollama still work exactly as before.
 
 ## Known limitations
 

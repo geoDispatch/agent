@@ -1,0 +1,113 @@
+# GeoDispatch — full stack in two containers.
+#
+#   docker compose up --build
+#
+# First run is slow: the ollama service pulls qwen2.5:3b (~1.9 GB) and builds the
+# three geodispatch-* models inside the container before it reports healthy, and
+# the app deliberately waits for that. Later runs reuse the named volume below
+# and come up in seconds. See the "Docker" section of docs/README.md.
+#
+# This is an alternative to the Makefile flow, not a replacement: `make setup`
+# / `make run` against a host Ollama still work unchanged.
+
+services:
+  ollama:
+    image: ollama/ollama:0.32.15
+    # Pinned to the version this project was developed against (`ollama
+    # --version` on the dev box) rather than :latest, so a teammate's first run
+    # can't silently land on a different runtime than the one the models and
+    # docs were validated on.
+    container_name: geodispatch-ollama
+    environment:
+      # ⚠️ Load ONE model at a time. Each geodispatch-* model is ~1.9 GB and
+      # there are three of them; on the 7.6 GB dev box, letting Ollama hold all
+      # three resident caused swap-thrashing (free RAM collapsed to ~191 MB with
+      # ~5 GB swap in seconds — see docs/README.md "Known limitations"). The
+      # host setup documents the same value as a systemd override; in Docker it
+      # is just an env var, which is why the container path needs no sudo.
+      # Raise it only on a box with >8 GB of genuinely free RAM.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      # Bind inside the container's own namespace only. Reachable as
+      # http://ollama:11434 from the app service over the compose network.
+      OLLAMA_HOST: "0.0.0.0:11434"
+    expose:
+      # Container-to-container only — NOT published to the host. The host
+      # already runs its own Ollama on 11434 for the Makefile flow, so
+      # publishing here would either clash with it or shadow it. To poke this
+      # one directly while debugging, either uncomment the ports block below or
+      # go through the app container:
+      #   docker compose exec ollama ollama list
+      - "11434"
+    # ports:
+    #   - "11435:11434"   # debug only: host 11435 -> container 11434
+    volumes:
+      # Model weights + manifests + the init script's build stamps. Named volume
+      # so `docker compose down` and restarts do NOT re-download qwen2.5:3b.
+      - ollama-models:/root/.ollama
+      # The Modelfiles are mounted, not baked in: editing one on the host and
+      # restarting rebuilds that model (the init script hashes them), which is
+      # the normal loop while tuning prompts.
+      - ./modelfiles:/modelfiles:ro
+      - ./docker/init-models.sh:/usr/local/bin/init-models.sh:ro
+    # Replaces the image's default `ollama serve`: serve + idempotent pull/build,
+    # then hand the foreground back to the server. See docker/init-models.sh.
+    entrypoint: ["/bin/sh", "/usr/local/bin/init-models.sh"]
+    healthcheck:
+      # TWO conditions, both required. The API answering is not enough: the app
+      # would then start and its first /decide would 500 against a model that
+      # has not been built yet. The marker file is written by the init script
+      # only after qwen2.5:3b is present and all three geodispatch-* models are
+      # built, so "healthy" here means "ready to serve /decide".
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 && test -f /tmp/geodispatch-models-ready"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      # Deliberately huge, and it costs a warm start nothing: Docker ends the
+      # start period the moment ONE probe succeeds, so a warm container leaves it
+      # after ~10s. Its only job is to stop a slow cold pull from being called a
+      # failure. Measured here: 1.9 GB at an effective ~200 KB/s (a stalling home
+      # link) took well over an hour, and an earlier 30m value expired mid-pull —
+      # the container flipped to `unhealthy`, and `depends_on` then aborted the
+      # app with "dependency failed to start" while the download was still
+      # healthily progressing. Sizing this for the worst plausible link rather
+      # than the median is the whole point.
+      start_period: 3h
+    restart: unless-stopped
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: geodispatch-app
+    environment:
+      # The one line that makes the app talk to the sibling container instead of
+      # localhost. services/ollama.py::_ollama_host defaults to
+      # http://127.0.0.1:11434 when this is unset, which is what keeps the
+      # non-Docker Makefile flow working unchanged.
+      OLLAMA_HOST: "http://ollama:11434"
+      # Same defaults the code already uses; spelled out here so the knobs are
+      # visible to whoever is tuning a slow box. connect 5s = fail fast if
+      # Ollama is down; read 240s = clear a cold model load (~110 s measured).
+      GEODISPATCH_OLLAMA_CONNECT_TIMEOUT: "5"
+      GEODISPATCH_OLLAMA_READ_TIMEOUT: "240"
+      # Keep at 1 while OLLAMA_MAX_LOADED_MODELS is 1 — same-model calls
+      # serialize server-side anyway, and firing a whole batch at once just
+      # burns each queued request's read timeout. Raise both together, with the
+      # RAM to back it.
+      GEODISPATCH_OLLAMA_MAX_INFLIGHT: "1"
+    ports:
+      # Published: this is the service teammates actually curl.
+      #   curl http://localhost:8000/health
+      - "8000:8000"
+    depends_on:
+      ollama:
+        # Wait for models-built-and-ready, not merely container-started.
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+    # Explicit name so it is obvious in `docker volume ls` what is holding
+    # ~2 GB, and so `docker compose down` (which keeps named volumes) is safe.
+    # To genuinely start over: docker compose down -v  (re-downloads everything)
+    name: geodispatch-ollama-models

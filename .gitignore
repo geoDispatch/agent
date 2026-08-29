@@ -7,3 +7,8 @@ __pycache__/
 .env
 .vscode/
 *.zst
+
+# Benchmark raw output + logs (harness and REPORT.md are tracked)
+docs/benchmarks/3b_vs_15b_raw.jsonl
+docs/benchmarks/*.bak
+docs/benchmarks/run.log

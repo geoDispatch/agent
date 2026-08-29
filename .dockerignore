@@ -1,0 +1,42 @@
+# Keep the build context small and the image clean.
+# The Dockerfile only COPYs main.py + routes/ services/ models/ prompts/, but a
+# fat context still costs time on every `docker compose build`.
+
+# Local virtualenv — host-built, wrong interpreter path, never wanted in-image
+.venv/
+venv/
+
+# Python bytecode. The `**/` prefix is load-bearing: .dockerignore patterns are
+# matched against the path from the context root, so a bare `__pycache__/` would
+# only exclude a top-level one and let services/__pycache__ etc. into the image
+# (verified — they were being copied). Host .pyc are compiled by a different
+# interpreter build than the base image's and are dead weight at best.
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Git metadata
+.git/
+.gitignore
+
+# Benchmark raw output — large JSONL files, not needed at runtime
+docs/benchmarks/
+
+# Ollama tarballs / archives that sometimes sit in the tree
+*.zst
+*.aria2
+*.tar
+
+# Local env file: secrets/config belong in compose env, not baked into a layer
+.env
+
+# Editor / tooling noise
+.vscode/
+.idea/
+.claude/
+
+# Docker's own files (nothing in the image needs them)
+Dockerfile
+docker-compose.yml
+.dockerignore
