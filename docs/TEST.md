@@ -28,14 +28,24 @@ fails loudly if those files are missing or don't match `AgentRequest`/`AgentResp
 
 ## 2. `test_quality.py`
 **Checks:** sends 10 synthetic Arabic/French/English (including code-switched)
-device batches to the local model and checks that every response is valid JSON
-matching the `DeviceDecision` shape.
+device batches to the real per-hazard models and checks that every response is
+valid JSON matching the `DeviceDecision` shape, with an SMS that fits one
+segment.
 **Why it exists:** the original go/no-go harness — decides whether `qwen2.5:3b`
 is good enough to use at all, before building anything on top of it.
-**Needs Ollama:** Yes.
-**Runtime:** ~2-5 min.
+**Tests the Modelfiles.** It sends no system message (an Ollama system message
+would *replace* the Modelfile's baked-in `SYSTEM`), and routes each case to
+`geodispatch-<its own disaster_type>`. It used to do neither, so every result
+before 2026-08-30 was a verdict on an ad-hoc prompt in the test file rather than
+on any shipped model.
+**Scope limit:** its cases carry no `nearest_shelters`, so they exercise the
+no-shelter SMS fallback, not shelter-name fidelity.
+**Needs Ollama:** Yes — `make build-models` first.
+**Runtime:** ~5-10 min (two cold model loads at ~83 s each on this box).
 ```bash
 .venv/bin/python tests/test_quality.py
+# or measure the bare base model instead of the shipped prompts:
+OLLAMA_MODEL=qwen2.5:3b .venv/bin/python tests/test_quality.py
 ```
 
 ## 3. `live_notconnected.py`
@@ -47,6 +57,10 @@ delivery to an unconnected device isn't reliable enough to attempt. Earlier
 versions of the model ignored this and sent SMS anyway, even under adversarial
 conditions (max severity, tsunami risk). This test targets that exact failure
 mode directly.
+**Tests the Modelfiles.** It goes through `services.ollama.call_agent`, which
+sends no system message, so the Modelfile's baked-in `SYSTEM` prompt is what
+actually runs — and unlike `test_quality.py` its requests are real
+`AgentRequest`s with `nearest_shelters` populated.
 **Needs Ollama:** Yes.
 **Runtime:** ~1-2 min.
 ```bash
@@ -128,6 +142,23 @@ a hang).
 ```bash
 .venv/bin/python tests/test_max_devices.py
 ```
+
+---
+
+## Not covered by `tests/` — shelter-name fidelity
+
+Nothing in `tests/` checks that a non-empty `sms_message` names **this batch's
+real shelter**. `test_quality.py`'s synthetic cases carry no `nearest_shelters` at
+all, and `live_notconnected.py` asserts on `action` and SMS emptiness, not on the
+message text. That gap was covered ad hoc on 2026-08-30 by a 6-case probe through
+`services.ollama.call_agent` (one distinctive shelter name per case, all three
+hazards) which found the name reproduced verbatim in only 3 of 6 cases and in
+both clauses in 1 of 6 — see the "Known limitation" section of
+`docs/MODELFILES.md` for the measurements and why it was not pursued further.
+
+If you promote that probe into `tests/`, note the constraint that shaped it: on a
+7.6 GB box with `OLLAMA_MAX_LOADED_MODELS=1`, a 6-case run spanning three hazards
+gets OOM-killed. Run one hazard pair per invocation.
 
 ---
 

@@ -40,11 +40,16 @@ def build_prompt(request: AgentRequest) -> str:
         lines.append(f"    zone: {device.zone}")
 
     # Nearest shelters — skip the block entirely when the list is empty.
+    # The "name:" label is load-bearing, not decoration: the Modelfile's SMS
+    # SHELTER NAME rule says to copy "the name field of the nearest entry", and
+    # with a bare bullet the model had no field by that name to copy from. It
+    # translated or transliterated the name instead (Complexe Sportif Zerktouni
+    # -> "Complexe Sportif زرتكوني") in 4 of 6 probe cases on 2026-08-30.
     if request.nearest_shelters:
         lines.append("")
         lines.append(f"nearest_shelters ({len(request.nearest_shelters)}):")
         for shelter in request.nearest_shelters:
-            lines.append(f"- {shelter.name} ({shelter.distance_km} km)")
+            lines.append(f"- name: {shelter.name} ({shelter.distance_km} km)")
 
     # Network status — affects SMS deliverability.
     lines.append("")

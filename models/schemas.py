@@ -108,9 +108,10 @@ class DeviceDecision(StrictModel):
     sms_message: str = Field(..., max_length=320)
     # CONTRACT DIRECTION: 0 = not flagged; 1 = HIGHEST urgency; urgency DECREASES
     # as the number rises toward 10 (higher number = dispatched LATER).
-    # !! MISMATCH: test_quality.py's system prompt tells the model "10 = most
-    # urgent" — the OPPOSITE direction. Fix that prompt before shipping, or Go
-    # receives inverted priorities. Schema range (0-10) is correct either way.
+    # The Modelfile SYSTEM prompts state this same direction, and since
+    # tests/test_quality.py no longer sends a system message of its own (it used
+    # to, which is what the old mismatch note here was about), the Modelfiles are
+    # the single place this direction is stated to the model.
     rescue_priority: int = Field(..., ge=0, le=10)
     confidence: float = Field(..., ge=0.0, le=1.0)
     # Internal audit log ONLY — never shown to end users or sent via SMS.

@@ -4,9 +4,20 @@ test_quality.py — Qwen2.5 go/no-go harness for the GeoDispatch triage agent.
 
 Feeds 10 synthetic TriagedDevice batches (earthquake / flood / heatwave,
 mixing AR / FR / EN / code-switched AR-FR in the *government narrative and
-context* fields — not victim free-text) to a local Ollama qwen2.5 model and
-checks that every response is valid JSON with the required decision shape and
-an SMS that fits in a single 160-char message.
+context* fields — not victim free-text) to the real per-hazard GeoDispatch
+models and checks that every response is valid JSON with the required decision
+shape and an SMS that fits in a single 160-char message.
+
+THIS HARNESS TESTS THE MODELFILES. It sends NO system message, exactly like
+services/ollama.py::_decide_device, so the `SYSTEM` prompt baked into
+modelfiles/Modelfile.<hazard> is what actually runs. It used to send its own
+SYSTEM_PROMPT in messages[], which silently overrode the Modelfile SYSTEM
+entirely — every result from that version was a verdict on the ad-hoc prompt in
+this file, not on the shipped models. Do not reintroduce a system message here.
+
+Each case is routed by its own `disaster_type` to the matching model
+(geodispatch-earthquake / -flood / -heatwave), so hazard-specific prompt rules
+are exercised too.
 
 Decision shape the model must emit (and ONLY this):
     {
@@ -16,10 +27,16 @@ Decision shape the model must emit (and ONLY this):
       "confidence":      float,    # 0..1
       "reasoning":       str
     }
+(The Modelfiles also emit `phone`, `zone_confirmed` and `zone_escalated` per
+models/schemas.py::DeviceDecision; extra fields are not failures here.)
 
 Deps: `ollama` + Python stdlib only.
 Run:  python3 test_quality.py
-Env:  OLLAMA_MODEL (default "qwen2.5"), OLLAMA_HOST (default lib default),
+Env:  OLLAMA_MODEL   optional — pin ONE model for all 10 cases (e.g.
+                     `qwen2.5:3b` to measure the bare base model). Unset is the
+                     normal path: route per hazard. There is deliberately no
+                     bare "qwen2.5" default; that tag is not pulled and 404s.
+      OLLAMA_HOST    default: ollama lib default (localhost:11434)
       OLLAMA_JSON_FORMAT ("1"/"0", default "1" — use Ollama's JSON mode),
       NO_COLOR (disable ANSI colors).
 """
@@ -40,12 +57,34 @@ except ImportError:
 # Config
 # --------------------------------------------------------------------------- #
 
-MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5")
+# One model per hazard — the real shipped models, whose Modelfile SYSTEM prompt
+# is the thing under test. Built by `make build-models`.
+MODEL_BY_HAZARD = {
+    "earthquake": "geodispatch-earthquake",
+    "flood": "geodispatch-flood",
+    "heatwave": "geodispatch-heatwave",
+}
+# Optional override: pin every case to ONE model (e.g. OLLAMA_MODEL=qwen2.5:3b to
+# measure the bare base model). No default — routing per hazard is the norm.
+MODEL_OVERRIDE = os.environ.get("OLLAMA_MODEL")
 HOST = os.environ.get("OLLAMA_HOST")  # None -> ollama lib default (localhost:11434)
 # JSON mode constrains Ollama's decoder to emit valid JSON. It's what you'd
 # ship, so it's the default here; set OLLAMA_JSON_FORMAT=0 to instead test the
 # model's raw prompt-following (JSON purely because the system prompt said so).
 USE_JSON_FORMAT = os.environ.get("OLLAMA_JSON_FORMAT", "1") != "0"
+
+
+def model_for(device):
+    """The model that serves this device in production, or the pinned override."""
+    if MODEL_OVERRIDE:
+        return MODEL_OVERRIDE
+    try:
+        return MODEL_BY_HAZARD[device["disaster_type"]]
+    except KeyError:
+        raise SystemExit(
+            f"no model mapped for disaster_type {device.get('disaster_type')!r} "
+            f"(known: {sorted(MODEL_BY_HAZARD)})"
+        )
 
 SMS_LIMIT = 160  # single-segment GSM-7 SMS
 UCS2_LIMIT = 70  # single-segment SMS once any non-Latin (e.g. Arabic) char appears
@@ -71,55 +110,15 @@ def bold(t):     return _c(t, "1")
 def bold_red(t): return _c(t, "1;91")
 
 # --------------------------------------------------------------------------- #
-# System prompt
+# No system prompt, deliberately
 # --------------------------------------------------------------------------- #
-
-SYSTEM_PROMPT = """\
-You are the decision core of GeoDispatch, a disaster-response triage agent.
-
-You receive ONE TriagedDevice as JSON. Its zone was already classified by an
-upstream service. Fields:
-  disaster_type      earthquake | flood | heatwave
-  severity           low | moderate | high | critical
-  zone               red (most affected) | amber | green (least affected)
-  reachability_status  reachable | intermittent | unreachable  (cellular link)
-  distance_km        distance from the device to the nearest response team
-  network_congestion low | moderate | high | severe  (SMS delivery reliability)
-  gov_narrative      official situation text (may be Arabic, French, English,
-                     or code-switched Arabic/French)
-  context            extra situational context, same languages
-  preferred_language optional hint for the SMS language
-
-Decide what to do for this device and reply with ONLY a JSON object, no prose,
-no markdown fences:
-  {
-    "action": "sms" | "rescue_flag" | "both" | "none",
-    "sms_message": string,
-    "rescue_priority": integer 0-10,
-    "confidence": number 0-1,
-    "reasoning": string
-  }
-
-Rules:
-- action:
-    "sms"         send an SMS only (device reachable, self-help/advice helps).
-    "rescue_flag" flag for physical rescue only (no reliable SMS path, or SMS
-                  alone is insufficient).
-    "both"        send an SMS AND flag for rescue.
-    "none"        no action warranted (low risk, green zone, no need).
-- sms_message: <= 160 characters, actionable and calm. Write it in the language
-  of gov_narrative/context (use preferred_language if given). If action is
-  "rescue_flag" or "none", set it to "".
-- rescue_priority: 0 = NOT flagged for rescue. For flagged devices the scale is
-  INVERTED: 1 = highest urgency (dispatch FIRST), 10 = lowest urgency among
-  flagged devices (dispatch LAST). LOWER the number toward 1 for critical
-  severity, red zone, unreachable status, and short distance_km — a
-  life-threatening, unreachable device in the red zone is 1 or 2, never 8-10.
-- If reachability is unreachable or network_congestion is severe, prefer
-  rescue_flag/both over sms-only, since the SMS may never arrive.
-- confidence: your certainty in this decision, 0-1.
-- reasoning: one short sentence (English is fine).
-Output the JSON object and nothing else."""
+# This harness used to define a SYSTEM_PROMPT here and send it in messages[].
+# An Ollama system message REPLACES the Modelfile's baked-in SYSTEM prompt, so
+# that made the harness test this file's ad-hoc prompt instead of the shipped
+# models — a green run said nothing about modelfiles/Modelfile.<hazard>. The
+# production path (services/ollama.py::_decide_device) sends the device JSON as
+# the only message and lets the Modelfile SYSTEM govern; this harness now does
+# exactly the same. Do not add a system message back.
 
 # --------------------------------------------------------------------------- #
 # 10 synthetic TriagedDevice test cases
@@ -256,11 +255,14 @@ TEST_CASES = [
 
 
 def call_model(client, device):
-    """Return the model's raw text response for one device."""
+    """Return the model's raw text response for one device.
+
+    Mirrors services/ollama.py::_decide_device exactly: the device JSON is the
+    ONLY message, so the Modelfile's baked-in SYSTEM prompt is what governs.
+    """
     resp = client.chat(
-        model=MODEL,
+        model=model_for(device),
         messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": json.dumps(device, ensure_ascii=False)},
         ],
         format="json" if USE_JSON_FORMAT else "",
@@ -370,6 +372,7 @@ def print_case(i, device, raw, passed, obj, errors, warnings):
     print(cyan("-" * 78))
 
     print(bold("INPUT:"))
+    print(f"  model={model_for(device)}")
     print(f"  zone={device['zone']}  reachability={device['reachability_status']}  "
           f"distance_km={device['distance_km']}  congestion={device['network_congestion']}")
     print(f"  gov_narrative: {device['gov_narrative']}")
@@ -396,26 +399,50 @@ def print_case(i, device, raw, passed, obj, errors, warnings):
 
 
 def main():
-    print(bold(f"GeoDispatch quality harness — model={MODEL!r}  "
+    routing = (f"model={MODEL_OVERRIDE!r} (OLLAMA_MODEL override — every case)"
+               if MODEL_OVERRIDE else
+               "models=per-hazard " + "/".join(sorted(set(MODEL_BY_HAZARD.values()))))
+    print(bold(f"GeoDispatch quality harness — {routing}  "
                f"json_format={'on' if USE_JSON_FORMAT else 'off'}  "
                f"cases={len(TEST_CASES)}"))
+    print(bold("no system message: the Modelfile SYSTEM prompt is what is under test"))
 
     client = ollama.Client(host=HOST) if HOST else ollama.Client()
 
     # Pre-flight so a dead server fails once with a clear message, not 10 times.
     try:
-        client.list()
+        available = {m.model for m in client.list().models}
     except Exception as exc:  # noqa: BLE001 — surface any connection error clearly
         sys.exit(bold_red(
             f"\nCannot reach Ollama ({exc}).\n"
-            "Start it with `ollama serve` and pull the model: "
-            f"`ollama pull {MODEL}`."
+            "Start it with `ollama serve`, then `make build-models`."
+        ))
+
+    # Fail once, up front, if a model this run needs isn't built — otherwise
+    # every case 404s separately and the summary blames the model's answers.
+    needed = ({MODEL_OVERRIDE} if MODEL_OVERRIDE
+              else {model_for(d) for d in TEST_CASES})
+    missing_models = sorted(
+        m for m in needed
+        if m not in available and f"{m}:latest" not in available
+    )
+    if missing_models:
+        sys.exit(bold_red(
+            f"\nmodel(s) not found in Ollama: {', '.join(missing_models)}\n"
+            "Build the per-hazard models with `make build-models`"
+            + (f", or pull {MODEL_OVERRIDE!r}." if MODEL_OVERRIDE else ".")
         ))
 
     passed_count = 0
     failed_ids = []
 
-    for i, device in enumerate(TEST_CASES, 1):
+    # Group by model, keeping each case's original 1-based number for the report.
+    # This box runs OLLAMA_MAX_LOADED_MODELS=1, so every model switch is a cold
+    # reload (~83 s). TEST_CASES alternates hazards, which would pay that ~9
+    # times; hazard-major order pays it twice. Same cases, same checks.
+    ordered = sorted(enumerate(TEST_CASES, 1), key=lambda pair: model_for(pair[1]))
+
+    for i, device in ordered:
         try:
             raw = call_model(client, device)
         except Exception as exc:  # noqa: BLE001 — a failed call is a failed case
@@ -442,8 +469,9 @@ def main():
         print("  failed cases: " + ", ".join(failed_ids))
 
     verdict = "GO ✓" if failed_count == 0 else "NO-GO ✗"
-    print(bold(green(f"\n{verdict}  — Qwen2.5 handled every case."
-                     if failed_count == 0 else "")) if failed_count == 0
+    subject = MODEL_OVERRIDE if MODEL_OVERRIDE else "the per-hazard Modelfiles"
+    print(bold(green(f"\n{verdict}  — {subject} handled every case."))
+          if failed_count == 0
           else bold_red(f"\n{verdict}  — {failed_count} case(s) failed; "
                         f"consider the OpenRouter fallback."))
 
