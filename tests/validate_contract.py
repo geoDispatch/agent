@@ -10,6 +10,16 @@ real payloads live in their top-level "examples" array. So we validate every
 entry in examples[] (per-example pass/fail), not the schema envelope. If a file
 is missing, this falls back to a contract-shaped fixture and says so LOUDLY — a
 fallback pass does NOT prove the real payloads parse.
+
+Two more checks keep the agent from silently drifting away from the contract:
+  * drift: contracts/examples/ai_{request,response}.json here are COPIES of the
+    canonical files in ../contracts/examples (the contracts repo next to
+    agent/). When that directory exists the copies must be byte-identical
+    (fix with `sh contracts/sync.sh` from the directory holding both).
+  * field sets: every Pydantic model's field names must equal the schema's
+    "properties" keys and its required fields the schema's "required" list,
+    so a field added on one side only (e.g. the old Go-only shelter_name)
+    fails here instead of in production.
 """
 import json
 import pathlib
@@ -25,10 +35,34 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from models import AgentRequest, AgentResponse, Shelter
+from models import (
+    AgentRequest,
+    AgentResponse,
+    Coordinates,
+    DeviceDecision,
+    NetworkStatus,
+    Shelter,
+    TriagedDevice,
+)
 
 REQ_PATH = REPO_ROOT / "contracts" / "examples" / "ai_request.json"
 RESP_PATH = REPO_ROOT / "contracts" / "examples" / "ai_response.json"
+# Canonical contracts: the contracts repo checked out next to agent/ (dev tree
+# and deploy layout). Absent in a standalone agent checkout.
+CANON_DIR = REPO_ROOT.parent / "contracts" / "examples"
+
+# (model, schema file, path from the schema root). Nested models are reached
+# through the request/response properties that hold them, so a renamed
+# property or a re-pointed $ref is caught too, not just a changed definition.
+FIELD_SET_CHECKS = [
+    (AgentRequest, REQ_PATH, ()),
+    (TriagedDevice, REQ_PATH, ("devices", "items")),
+    (Shelter, REQ_PATH, ("nearest_shelters", "items")),
+    (Coordinates, REQ_PATH, ("nearest_shelters", "items", "location")),
+    (NetworkStatus, REQ_PATH, ("network_status",)),
+    (AgentResponse, RESP_PATH, ()),
+    (DeviceDecision, RESP_PATH, ("decisions", "items")),
+]
 
 REQ_FIXTURE = {
     "event_id": "evt-demo-001", "disaster_type": "earthquake", "severity": 8.2,
@@ -76,6 +110,95 @@ def load_examples(path, fixture):
     return [fixture], f"FIXTURE (!! {path} not found — contract-shaped fallback)"
 
 
+def check_drift():
+    """Local contract copies must be byte-identical to ../contracts/examples.
+
+    Returns True when consistent (or when there is no canonical dir to compare
+    against — a standalone agent checkout — which is reported as SKIP).
+    """
+    if not CANON_DIR.is_dir():
+        print(f"SKIP drift check: {CANON_DIR} not found (standalone agent checkout)")
+        return True
+    ok = True
+    print(f"Drift vs canonical [{CANON_DIR}]")
+    for local in (REQ_PATH, RESP_PATH):
+        canon = CANON_DIR / local.name
+        if not canon.exists():
+            ok = False
+            print(f"  FAIL {local.name}: canonical file {canon} is missing")
+        elif not local.exists():
+            ok = False
+            print(f"  FAIL {local.name}: local copy {local} is missing (run: sh contracts/sync.sh)")
+        elif local.read_bytes() != canon.read_bytes():
+            ok = False
+            print(f"  FAIL {local.name}: local copy differs from canonical (run: sh contracts/sync.sh)")
+        else:
+            print(f"  OK  {local.name} byte-identical to canonical")
+    return ok
+
+
+def resolve(doc, node):
+    """Follow local "$ref": "#/..." pointers until a concrete schema node."""
+    for _ in range(32):
+        ref = node.get("$ref") if isinstance(node, dict) else None
+        if ref is None:
+            return node
+        if not ref.startswith("#/"):
+            raise ValueError(f"only local $ref supported, got {ref!r}")
+        node = doc
+        for part in ref[2:].split("/"):
+            node = node[part.replace("~1", "/").replace("~0", "~")]
+    raise ValueError("$ref chain too deep (cycle?)")
+
+
+def schema_node(doc, path):
+    """Walk property names (and the array keyword "items") from the root."""
+    node = resolve(doc, doc)
+    for step in path:
+        node = resolve(doc, node["items"] if step == "items" else node["properties"][step])
+    return node
+
+
+def check_field_sets():
+    """Pydantic field names / required fields must equal the schema's."""
+    ok = True
+    docs = {}
+    print("Field sets (Pydantic vs schema properties / required)")
+    for model, path, steps in FIELD_SET_CHECKS:
+        where = f"{path.name}:{'/'.join(steps) or '(root)'}"
+        if not path.exists():
+            print(f"  SKIP {model.__name__}: {path} not found — field sets NOT verified")
+            continue
+        try:
+            doc = docs.setdefault(path, json.loads(path.read_text()))
+            node = schema_node(doc, steps)
+        except (KeyError, TypeError, ValueError) as e:
+            ok = False
+            print(f"  FAIL {model.__name__}: cannot resolve {where} ({e!r})")
+            continue
+        fields = {f.alias or name: f for name, f in model.model_fields.items()}
+        names = set(fields)
+        required = {name for name, f in fields.items() if f.is_required()}
+        props = set(node.get("properties", {}))
+        schema_req = set(node.get("required", []))
+        problems = []
+        if names != props:
+            problems.append(f"fields only in Pydantic: {sorted(names - props)}, "
+                            f"only in schema: {sorted(props - names)}")
+        if required != schema_req:
+            problems.append(f"required only in Pydantic: {sorted(required - schema_req)}, "
+                            f"only in schema: {sorted(schema_req - required)}")
+        # extra="forbid" is the Pydantic side of additionalProperties: false.
+        if node.get("additionalProperties") is not False or model.model_config.get("extra") != "forbid":
+            problems.append("schema additionalProperties must be false and model extra must be 'forbid'")
+        if problems:
+            ok = False
+            print(f"  FAIL {model.__name__} vs {where}: " + "; ".join(problems))
+        else:
+            print(f"  OK  {model.__name__} == {where} ({len(names)} fields, {len(required)} required)")
+    return ok
+
+
 def main():
     print(f"pydantic import OK; python {sys.version.split()[0]}")
     ok = True
@@ -117,6 +240,9 @@ def main():
         print("FAIL old lat/lon was NOT rejected (extra='forbid' not working)")
     except ValidationError:
         print("OK  old lat/lon rejected (extra='forbid')")
+
+    ok = check_field_sets() and ok
+    ok = check_drift() and ok
 
     print("\n" + ("ALL GOOD" if ok else "FAILURES ABOVE"))
     sys.exit(0 if ok else 1)

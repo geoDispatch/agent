@@ -53,8 +53,9 @@
     },
     "devices": {
       "type": "array",
-      "description": "All triaged devices in this zone batch (up to 20 per batch)",
+      "description": "All triaged devices in this zone batch (up to 20 per batch: AGENT_BATCH_SIZE is clamped to 1..20 and the agent rejects larger batches)",
       "minItems": 1,
+      "maxItems": 20,
       "items": {
         "$ref": "#/definitions/TriagedDevice"
       }
