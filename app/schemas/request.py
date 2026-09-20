@@ -6,16 +6,16 @@ from enum import Enum
 
 class Status(str, Enum):
     """Network congestion level, from low load up to critical saturation."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-    CRITICAL = "critical"
-    UNKNOWN = "unknown"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"
+    UNKNOWN = "UNKNOWN"
 
 
 class QosStatus(str, Enum):
     """Quality-of-Service state of a prioritized network slice for a device."""
-    INTERACTIVE = "interactive"
+    INACTIVE = "inactive"
     REQUESTED = "requested"
     ACTIVE = "active"
     FAILED = "failed"
@@ -23,9 +23,9 @@ class QosStatus(str, Enum):
 
 class ReachabilityStatus(str, Enum):
     """How a device can currently be reached: full data, SMS only, or offline."""
-    DATA_CONNECTED = "data_connected"
-    CONNECTED_SMS = "connected_sms"
-    NOT_CONNECTED = "not_connected"
+    CONNECTED_DATA = "CONNECTED_DATA"
+    CONNECTED_SMS = "CONNECTED_SMS"
+    NOT_CONNECTED = "NOT_CONNECTED"
 
 
 class Zone(str, Enum):
@@ -44,9 +44,9 @@ class DisasterType(str, Enum):
 
 class AftershockRisk(str, Enum):
     """Likelihood of further aftershocks following an earthquake."""
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
 
 
 class Coordinates(BaseModel):
@@ -64,10 +64,10 @@ class NetworkStatus(BaseModel):
 
 class TriagedDevice(BaseModel):
     """A single citizen device that has been located and triaged during a disaster."""
-    phone_number: Optional[str] = Field(..., description="The phone number of the device.")
+    phone: str = Field(..., pattern=r"^\+[1-9]\d{1,14}$", description="The phone number of the device in E.164 format.")
     latitude: float = Field(..., ge=-90, le=90, description="Latitude in degrees, must be between -90 and 90.")
     longitude: float = Field(..., ge=-180, le=180, description="Longitude in degrees, must be between -180 and 180.")
-    location_radius_meters: Optional[float] = Field(None, ge=0.0, description="The radius in meters around the location.")
+    location_radius_m: Optional[float] = Field(None, ge=0.0, description="The radius in meters around the location.")
     last_location_time: Optional[datetime] = Field(None, description="The last time the location was updated.")
     reachability_status: ReachabilityStatus = Field(..., description="The reachability status of the device.")
     last_status_time: Optional[datetime] = Field(None, description="The last time the device was reachable.")
@@ -80,7 +80,7 @@ class Shelter(BaseModel):
     name: str = Field(..., description="The name of the shelter.")
     address: str = Field(..., description="The address of the shelter.")
     capacity: Optional[int] = Field(None, ge=0, description="The capacity of the shelter.")
-    coordinates: Coordinates = Field(..., description="The geographical coordinates of the shelter.")
+    location: Coordinates = Field(..., description="The geographical coordinates of the shelter.")
     distance_km: Optional[float] = Field(None, ge=0.0, description="The distance in kilometers to the shelter.")
 
 
@@ -89,7 +89,7 @@ class AgentRequest(BaseModel):
     devices, the nearest shelters, and current network status to decide from."""
     event_id: str = Field(..., description="The unique identifier for the event.")
     disaster_type: DisasterType = Field(..., description="The type of disaster.")
-    severity: Optional[float] = Field(None, ge=0.0, le=1.0, description="The severity of the disaster at this location, between 0 and 1.")
+    severity: Optional[float] = Field(None, ge=0.0, le=10.0, description="Richter magnitude (earthquake) or equivalent severity scale, between 0 and 10.")
     aftershock_risk: Optional[AftershockRisk] = Field(None, description="The risk of aftershocks.")
     tsunami_risk: Optional[bool] = Field(None, description="Indicates if there is a tsunami risk.")
     zone: Zone = Field(..., description="The zone of the disaster.")
