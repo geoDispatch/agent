@@ -89,7 +89,7 @@ class AgentRequest(BaseModel):
     devices, the nearest shelters, and current network status to decide from."""
     event_id: str = Field(..., description="The unique identifier for the event.")
     disaster_type: DisasterType = Field(..., description="The type of disaster.")
-    severity: Optional[float] = Field(None, ge=0.0, le=10.0, description="Richter magnitude (earthquake) or equivalent severity scale, between 0 and 10.")
+    severity: float = Field(..., ge=0.0, le=10.0, description="Richter magnitude (earthquake) or equivalent severity scale, between 0 and 10.")
     aftershock_risk: Optional[AftershockRisk] = Field(None, description="The risk of aftershocks.")
     tsunami_risk: Optional[bool] = Field(None, description="Indicates if there is a tsunami risk.")
     zone: Zone = Field(..., description="The zone of the disaster.")
