@@ -27,11 +27,9 @@ def valid_response_payload():
     example_payload = schema.get("examples", [])[0]
     return example_payload
 
-
 def test_valid_response_parses(valid_response_payload):
     validated_data = AgentResponse(**valid_response_payload)
     assert validated_data is not None
-
 
 def test_invalid_action_fails(valid_response_payload):
     """Test that an action outside the allowed enum fails validation."""
@@ -40,14 +38,12 @@ def test_invalid_action_fails(valid_response_payload):
     with pytest.raises(ValidationError):
         AgentResponse(**mutated)
 
-
 def test_rescue_priority_out_of_range_fails(valid_response_payload):
     """Test that a rescue_priority above the max of 10 fails validation."""
     mutated = copy.deepcopy(valid_response_payload)
     mutated["decisions"][0]["rescue_priority"] = 11
     with pytest.raises(ValidationError):
         AgentResponse(**mutated)
-
 
 def test_sms_message_too_long_fails(valid_response_payload):
     """Test that an sms_message longer than 320 characters fails validation."""
@@ -56,14 +52,12 @@ def test_sms_message_too_long_fails(valid_response_payload):
     with pytest.raises(ValidationError):
         AgentResponse(**mutated)
 
-
 def test_missing_reasoning_fails(valid_response_payload):
     """Test that deleting the required reasoning field triggers a validation error."""
     mutated = copy.deepcopy(valid_response_payload)
     del mutated["decisions"][0]["reasoning"]
     with pytest.raises(ValidationError):
         AgentResponse(**mutated)
-
 
 def test_confidence_out_of_range_fails(valid_response_payload):
     """Test that a top-level confidence above the max of 1.0 fails validation."""
