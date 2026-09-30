@@ -1,3 +1,4 @@
 pydantic
-"fastapi[standard]"
+fastapi
 pytest
+httpx

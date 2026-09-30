@@ -18,15 +18,9 @@ if project_root not in sys.path:
 # Construct the correct path to the contracts folder
 json_path = os.path.join(project_root, 'contracts', 'ai_response.json')
 
-#  Load the JSON and initialize the mock response
-with open(json_path, 'r') as file:
-    schema: dict = json.load(file)
-
-MOCK_RESPONSE = AgentResponse(**schema["examples"][0])
-
-# Define the router
 router = APIRouter()
 
 @router.post("/decide", response_model=AgentResponse)
 async def decide(request: AgentRequest) -> AgentResponse:
-    return MOCK_RESPONSE
+    response = await run_agent(request)
+    return response
