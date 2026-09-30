@@ -1,0 +1,26 @@
+FROM ./qwen2.5-1.5b-instruct.Q8_0.gguf
+
+TEMPLATE """{{- if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{- end }}
+{{- range .Messages }}
+{{- if eq .Role "user" }}<|im_start|>user
+{{ .Content }}<|im_end|>
+{{- else if eq .Role "assistant" }}<|im_start|>assistant
+{{ .Content }}<|im_end|>
+{{- end }}
+{{- end }}
+<|im_start|>assistant
+"""
+
+SYSTEM """You are an emergency disaster triage agent. Output valid JSON strictly conforming to the response schema."""
+
+PARAMETER temperature 0
+PARAMETER top_p 1
+PARAMETER min_p 0
+PARAMETER repeat_penalty 1.0
+PARAMETER num_ctx 6144
+PARAMETER num_predict 1500
+
+PARAMETER stop "<|im_end|>"
+PARAMETER stop "<|endoftext|>"
