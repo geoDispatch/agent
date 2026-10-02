@@ -4,6 +4,7 @@ import sys
 from fastapi import APIRouter
 from app.schemas.request import AgentRequest
 from app.schemas.response import AgentResponse
+from app.agent import run_agent
 
 # Get the directory of the current file (app/routers)
 current_dir = os.path.dirname(os.path.abspath(__file__))

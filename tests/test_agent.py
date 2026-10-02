@@ -74,6 +74,7 @@ async def test_run_agent_success(run_agent, agent_request, expected_response, ol
             "model": OLLAMA_MODEL,
             "messages": [{"role": "user", "content": agent_request.model_dump_json()}],
             "stream": False,
+            "format": AgentResponse.model_json_schema(),
         },
     )
 

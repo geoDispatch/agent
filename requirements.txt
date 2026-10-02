@@ -2,3 +2,4 @@ pydantic
 fastapi
 pytest
 httpx
+httpx2
