@@ -1,81 +1,55 @@
 from app.schemas.request import AgentRequest
 from app.schemas.response import AgentResponse
+from typing import Set
 
 class SemanticValidationError(ValueError):
     pass
+# validate event_id and zone_id in the response against the request
 
-def validate_phones(request_devices, response_decisions):
-    """
-    Every request device must have exactly one response decision.
-    """
-    request_phones = {device.phone for device in request_devices}
-    response_phones = [decision.phone for decision in response_decisions]
-    # Check duplicates first
-    if len(response_phones) != len(set(response_phones)):
-        return False
+def ValidateEventId(AgentRequest, AgentResponse) -> None:
+    if not AgentResponse.event_id or AgentResponse.event_id != AgentRequest.event_id:
+        raise SemanticValidationError("Event ID is not valid.")
 
-    return request_phones == set(response_phones)
+def ValidateZoneId(AgentRequest, AgentResponse) -> None:
+    if not AgentResponse.zone or AgentResponse.zone != AgentRequest.zone:
+        raise SemanticValidationError("Zone ID is not valid.")
+def ValidateDeviceDecisions(AgentRequest, AgentResponse) -> None:
+    if len(AgentResponse.decisions) != len(AgentRequest.devices):
+        raise SemanticValidationError("Number of decisions does not match number of devices.")
+    request_phones : Set[str] = {device.phone for device in AgentRequest.devices}
+    response_phones : Set[str] = {decision.phone for decision in AgentResponse.decisions}
+    if request_phones != response_phones:
+        raise SemanticValidationError("Device phone numbers in the response do not match those in the request.")
 
-def validate_device_zones(request_devices, response_decisions):
-    """
-    Compare every device with the response decision
-    belonging to the same phone.
-    """
+def ValidateZoneEscalation(request: AgentRequest, response: AgentResponse) -> None:
+    for request_device, response_decision in zip(request.devices, response.decisions):
+        if request_device.zone != response_decision.zone_confirmed and not response_decision.zone_escalated:
+            raise SemanticValidationError(
+                f"Device {request_device.phone} is marked as escalated in the "
+                "request but not in the response."
+            )
+        elif request_device.zone == response_decision.zone_confirmed and  response_decision.zone_escalated:
+            raise SemanticValidationError(
+                f"Device {request_device.phone} is marked as escalated in the "
+                "request but not in the response."
+            )
+def ValidateActionConsistency(request: AgentRequest, response: AgentResponse) -> None:
+    for response_decision in response.decisions:
+        action = response_decision.action
+        has_sms = bool(response_decision.sms_message)
+        priority = response_decision.rescue_priority
+        if action == "sms":
+            invalid = not has_sms or priority != 0
+        elif action == "rescue_flag":
+            invalid = has_sms or priority <= 0
+        elif action == "both":
+            invalid = not has_sms or priority <= 0
+        elif action == "none":
+            invalid = has_sms
+        else:
+            invalid = False
 
-    decisions_by_phone: dict[str, AgentResponse] = {
-        decision.phone: decision for decision in response_decisions
-    }
-
-    for device in request_devices:
-        decision : AgentResponse | None = decisions_by_phone.get(device.phone)
-        if decision is None:
-            return False
-
-        request_zone = device.zone.value
-        response_zone = decision.zone_confirmed.value
-        # Zone changed but AI says it did NOT escalate
-        if request_zone != response_zone and not decision.zone_escalated:
-            return False
-        # AI says zone escalated but zone did not change
-        if request_zone == response_zone and decision.zone_escalated:
-            return False
-    return True
-
-def semantic_validator( request: AgentRequest,response: AgentResponse)-> bool:
-    """
-    Validate that AgentResponse logically corresponds
-    to the original AgentRequest.
-    """
-    # 1. Event ID must match
-    if response.event_id != request.event_id:
-        raise SemanticValidationError(
-            f"Event ID mismatch: "
-            f"{response.event_id} != {request.event_id}"
-        )
-    # 2. Batch zone must match
-    if response.zone.value != request.zone.value:
-        raise SemanticValidationError(
-            f"Zone mismatch: "
-            f"{response.zone.value} != {request.zone.value}"
-        )
-    # 3. Same number of devices and decisions
-    if len(response.decisions) != len(request.devices):
-        raise SemanticValidationError(
-            "Number of decisions does not match number of devices."
-        )
-    # 4. Decisions cannot be empty
-    if len(response.decisions) == 0:
-        raise SemanticValidationError(
-            "Decisions list cannot be empty."
-        )
-    # 5. Phones must match exactly
-    if not validate_phones(request.devices,response.decisions):
-        raise SemanticValidationError(
-            "Response phone numbers do not match request devices."
-        )
-    # 6. Check each device zone
-    if not validate_device_zones(request.devices, response.decisions):
-        raise SemanticValidationError(
-            "Device zone validation failed."
-        )
-    return True
+        if invalid:
+            raise SemanticValidationError(
+                f"Device {response_decision.phone} has an invalid action response."
+            )
