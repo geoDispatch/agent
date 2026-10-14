@@ -53,3 +53,9 @@ def ValidateActionConsistency(request: AgentRequest, response: AgentResponse) ->
             raise SemanticValidationError(
                 f"Device {response_decision.phone} has an invalid action response."
             )
+def semantic_validator(request, response):
+    ValidateEventId(request, response)
+    ValidateZoneId(request, response)
+    ValidateDeviceDecisions(request, response)
+    ValidateZoneEscalation(request, response)
+    ValidateActionConsistency(request, response)

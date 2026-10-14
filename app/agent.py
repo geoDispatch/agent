@@ -2,7 +2,7 @@ from app.config import OLLAMA_URL, OLLAMA_MODEL, OLLAMA_TIMEOUT
 from app.schemas.request import AgentRequest
 from app.schemas.response import AgentResponse
 import httpx
-from app.validation import semantic_validator
+from app.validators.semantic import semantic_validator
 
 # Build the chat request payload from the serialized request.
 def Generate_messages(request_json: str) -> dict:
