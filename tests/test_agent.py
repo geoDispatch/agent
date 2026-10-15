@@ -4,16 +4,25 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from pydantic import ValidationError
 
 from app.config import OLLAMA_MODEL, OLLAMA_URL
+from app.fallback import fallback
 from app.schemas.request import AgentRequest
 from app.schemas.response import AgentResponse
+from app.validators.semantic import semantic_validator
 
 
 pytestmark = pytest.mark.anyio
 CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
 CHAT_URL = f"{OLLAMA_URL}/api/chat"
+SYSTEM_PROMPT = (
+    "Return exactly one decision for each input device. "
+    "Do not duplicate devices. "
+    "Do not invent devices. "
+    "Do not omit devices. "
+    "Each input phone must appear exactly once in decisions. "
+    "The number of decisions must equal the number of input devices."
+)
 
 
 @pytest.fixture
@@ -36,9 +45,23 @@ def agent_request():
 
 
 @pytest.fixture
-def expected_response():
+def expected_response(agent_request):
+    # The contract example has more decisions than the request has devices;
+    # keep only matching phones so the mock passes semantic validation.
     contract = json.loads((CONTRACTS / "ai_response.json").read_text())
-    return AgentResponse.model_validate(contract["examples"][0])
+    example = contract["examples"][0]
+    phones = {device.phone for device in agent_request.devices}
+    example["decisions"] = [d for d in example["decisions"] if d["phone"] in phones]
+    return AgentResponse.model_validate(example)
+
+
+def assert_matches_request(response, request):
+    assert isinstance(response, AgentResponse)
+    assert response.event_id == request.event_id
+    assert response.zone == request.zone
+    assert len(response.decisions) == len(request.devices)
+    assert {d.phone for d in response.decisions} == {d.phone for d in request.devices}
+    semantic_validator(request, response)
 
 
 def chat_response(content):
@@ -63,49 +86,57 @@ def ollama_post(monkeypatch, expected_response):
 async def test_run_agent_success(run_agent, agent_request, expected_response, ollama_post):
     response = await run_agent(agent_request)
 
-    assert isinstance(response, AgentResponse)
-    assert response.event_id == agent_request.event_id
-    assert response.zone == expected_response.zone
-    assert response.decisions[0] == expected_response.decisions[0]
-    assert response.decisions[0].phone == agent_request.devices[0].phone
+    assert_matches_request(response, agent_request)
+    assert response == expected_response
+    assert response != fallback(agent_request)
+
+    # The schema pins the decision count to the number of request devices.
+    schema = AgentResponse.model_json_schema()
+    schema["properties"]["decisions"]["minItems"] = len(agent_request.devices)
+    schema["properties"]["decisions"]["maxItems"] = len(agent_request.devices)
     ollama_post.assert_awaited_once_with(
         CHAT_URL,
         json={
             "model": OLLAMA_MODEL,
-            "messages": [{"role": "user", "content": agent_request.model_dump_json()}],
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": agent_request.model_dump_json()},
+            ],
             "stream": False,
-            "format": AgentResponse.model_json_schema(),
+            "format": schema,
+            "options": {"temperature": 0},
         },
     )
 
 
-async def test_run_agent_invalid_model_json(run_agent, agent_request, ollama_post):
+async def test_run_agent_invalid_model_json(run_agent, agent_request, ollama_post, capsys):
     ollama_post.return_value = chat_response("not valid JSON")
 
-    with pytest.raises((json.JSONDecodeError, ValidationError)) as error:
-        await run_agent(agent_request)
+    response = await run_agent(agent_request)
 
-    # Both json.loads and Pydantic JSON parsing are valid parsing approaches.
-    if isinstance(error.value, ValidationError):
-        assert any(detail["type"] == "json_invalid" for detail in error.value.errors())
+    assert_matches_request(response, agent_request)
+    assert response == fallback(agent_request)
     ollama_post.assert_awaited_once()
+    output = capsys.readouterr().out
+    assert "AI response validation failed:" in output
+    assert "json_invalid" in output
 
 
 async def test_run_agent_invalid_response_schema(
-    run_agent, agent_request, expected_response, ollama_post
+    run_agent, agent_request, expected_response, ollama_post, capsys
 ):
     payload = expected_response.model_dump(mode="json")
     payload["decisions"][0]["action"] = "invalid_action"
     ollama_post.return_value = chat_response(json.dumps(payload))
 
-    with pytest.raises(ValidationError) as error:
-        await run_agent(agent_request)
+    response = await run_agent(agent_request)
 
-    assert any(
-        detail["loc"] == ("decisions", 0, "action") and detail["type"] == "enum"
-        for detail in error.value.errors()
-    )
+    assert_matches_request(response, agent_request)
+    assert response == fallback(agent_request)
     ollama_post.assert_awaited_once()
+    output = capsys.readouterr().out
+    assert "AI response validation failed:" in output
+    assert "decisions.0.action" in output
 
 
 async def test_run_agent_http_failure(run_agent, agent_request, ollama_post, capsys):
@@ -115,11 +146,13 @@ async def test_run_agent_http_failure(run_agent, agent_request, ollama_post, cap
         json={"error": "Ollama failed"},
     )
 
-    # The current handler prints HTTP errors and implicitly returns None.
-    assert await run_agent(agent_request) is None
+    response = await run_agent(agent_request)
+
+    assert_matches_request(response, agent_request)
+    assert response == fallback(agent_request)
     ollama_post.assert_awaited_once()
     output = capsys.readouterr().out
-    assert "HTTP error occurred:" in output
+    assert "Ollama HTTP error:" in output
     assert "500" in output
 
 
@@ -128,6 +161,9 @@ async def test_run_agent_timeout(run_agent, agent_request, ollama_post, capsys):
         "Ollama timed out", request=httpx.Request("POST", CHAT_URL)
     )
 
-    assert await run_agent(agent_request) is None
+    response = await run_agent(agent_request)
+
+    assert_matches_request(response, agent_request)
+    assert response == fallback(agent_request)
     ollama_post.assert_awaited_once()
-    assert "HTTP error occurred: Ollama timed out" in capsys.readouterr().out
+    assert "Ollama HTTP error: Ollama timed out" in capsys.readouterr().out
