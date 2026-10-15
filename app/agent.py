@@ -59,11 +59,6 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         content = response["message"]["content"]
         agent_response = AgentResponse.model_validate_json(content)
 
-        print("request devices:", len(request.devices))
-        print("ai decisions:", len(agent_response.decisions))
-        print("request phones:", [d.phone for d in request.devices])
-        print("AI phones:", [d.phone for d in agent_response.decisions])
-
         semantic_validator(
             request,
             agent_response
