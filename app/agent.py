@@ -37,7 +37,7 @@ async def run_agent(request: AgentRequest) -> AgentResponse:
         try:
             semantic_validator(request_json, AgentResponse.model_validate_json(content))
         except Exception as e:
-            print(f"Semantic validation error occurred: {e}")
+            fallback(request_json)
         return AgentResponse.model_validate_json(content)
     except httpx.HTTPError as http_err:
         print(f"HTTP error occurred: {http_err}")  # e.g., 404 Client Error
